@@ -1,0 +1,166 @@
+{
+  "repo_notes": [
+    {
+      "content": "Odoo is an open-source ERP/CRM monorepo (this fork tracks upstream odoo/odoo, branch 20.0). The repository has three layers: (1) `odoo/` — the Python server framework: custom ORM (odoo/orm, odoo/models, odoo/api.py, odoo/fields), module loader and registry (odoo/modules), HTTP/RPC stack (odoo/http), service layer (odoo/service), SQL layer (odoo/sql_db.py), CLI (odoo/cli), tests (odoo/tests) and upgrade machinery (odoo/upgrade, odoo/upgrade_code). (2) `odoo/addons/` — only the `base` addon plus `test_*` modules; `base` defines all core system models (res.users, res.partner, ir.*). (3) `addons/` — ~640 community business modules, each an installable addon with a `__manifest__.py`. `odoo-bin` is the server entry point; `doc/` holds RST developer docs; `debian/` and `setup/` hold packaging.",
+      "author": "Devin"
+    },
+    {
+      "content": "Coverage is the goal: document the whole repository, not just the framework. Group the ~640 addons by business domain as laid out in the pages below. Cover the 229 `l10n_*` localization modules collectively (shared structure: chart of accounts, taxes, fiscal positions, EDI/e-invoicing, reports) rather than one page per country. Bridge/glue modules named `<app1>_<app2>` (e.g. sale_stock, purchase_mrp, website_sale) integrate two apps — document them under their primary domain page.",
+      "author": "Devin"
+    },
+    {
+      "content": "This is community code only — there are no enterprise modules (no helpdesk, sign, documents, planning, quality, knowledge, whatsapp). Do not fabricate them. In this version `web_editor` was replaced by `html_editor` + `html_builder`, and the Python ORM code was split into `odoo/orm/` (models, fields_*, domains, query, cache, environments, registry) with `odoo/models` and `odoo/fields` kept as compatibility shims.",
+      "author": "Devin"
+    },
+    {
+      "content": "Addon anatomy worth explaining once and reusing everywhere: `models/` Python business logic on `models.Model`/`TransientModel`; `views/` XML for actions, menus, form/tree/kanban/search views; `security/` ir.model.access CSVs and ir.rule XML; `data/` + `demo/` XML/CSV records loaded via ir.model.data; `wizards/` transient models; `controllers/` HTTP routes; `static/src/` JavaScript/OWL components + SCSS; `i18n/` .pot/.po translations; `tests/` Python (TransactionCase/HttpCase) and JS tours. Translations, assets and QWeb templates are all declared in `__manifest__.py`.",
+      "author": "Devin"
+    },
+    {
+      "content": "Key cross-cutting concepts: the ORM returns recordsets (ordered, environment-carrying) rather than rows; `fields` are computed/stored/related via Python descriptors; business filtering uses prefix-notation domains; security is layered (ir.model.access CRUD per group, ir.rule record domains, field groups, sudo escapes); multi-company runs through `company_id`; the web client is a single-page OWL app calling JSON-RPC over `odoo/http` routes; background work runs on ir.cron and the `bus` longpolling/websocket channel.",
+      "author": "Devin"
+    }
+  ],
+  "pages": [
+    {
+      "title": "Architecture Overview",
+      "purpose": "Whole-repo map and entry point: how odoo-bin boots the CLI/service layer, loads addons into the registry, serves HTTP/RPC and talks to PostgreSQL. Explain the three layers (odoo/ framework, odoo/addons/base, addons/ business modules), the request lifecycle, the addon registry, and where documentation (doc/), packaging (debian/, setup/) and JS assets live. This page is the parent for the framework and business pages.",
+      "parent": null
+    },
+    {
+      "title": "Server Startup and Runtime",
+      "purpose": "Document odoo-bin, odoo/cli (start/stop/scaffold/shell commands), odoo/service (wsgi server, model/db/common services, security helpers), odoo/netsvc.py, odoo/sql_db.py (connection pooling, cursors), odoo/logging.py and configuration file handling. Cover process models (workers, cron, gevent/longpolling) and CLI flags.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "ORM and Data Model",
+      "purpose": "Document odoo/orm/* in depth: models.py and model_classes (Model/TransientModel/AbstractModel, _inherit/_inherits), fields_*.py (all field types, computed/stored/related), domains.py (prefix boolean domains), query.py and SQL generation, cache.py, environments.py (Environment, sudo, context), registry.py, commands.py (relational update commands), identifiers.py. Cover decorators (@api.depends, @api.model, @api.constrains), recordsets, onchange, write/create overrides, computed-field triggers and common pitfalls (n+1, rec vs. cache).",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "Module System and Registry",
+      "purpose": "Document odoo/modules: module discovery and manifest loading (__manifest__.py keys), module_graph (dependency resolution), loading.py lifecycle (init/install/update states, data file loading order), registry synchronization with database schema, migration.py hooks and neutralize.py. Explain how addons/ + odoo/addons/ paths are merged, the addons-path config, and post-load hooks.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "HTTP, RPC and Controllers",
+      "purpose": "Document odoo/http: router.py and routing_map (route registration via @http.route, auth types public/user/none, csrf), dispatcher.py dispatch, requestlib (request/response objects), session.py (cookie sessions, auth), geoip, stream.py. Cover JSON-RPC vs XML-RPC services (odoo/service/model.py, db.py, common.py), CORS, error handling (odoo/exceptions), and how addon controllers/ plug in.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "Base Addon, Security and i18n",
+      "purpose": "Document odoo/addons/base: res.users/res.groups/res.partner/res.company (multi-company), ir.* system models (ir.model.access, ir.rule, ir.sequence, ir.cron, ir.actions.*, ir.model.data, ir.config_parameter, ir.attachment, ir.translation, ir.ui.view/menu), decimal precision, res.lang and the .pot/.po translation machinery, image/attachment storage, scheduled jobs and database housekeeping.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "QWeb Templating and Reporting",
+      "purpose": "Document the ir.qweb engine (XML templating: t-if/t-foreach/t-call, expressions, directives), how views and report templates are compiled, the report engine (ir.actions.report, paper formats), base_report_wkhtmltox and base_report_paper_muncher PDF renderers, and how addons define printable reports.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "Web Client and OWL Framework",
+      "purpose": "Document addons/web static/src: the OWL-based SPA — webclient shell, action service, menu/navbar, services (rpc/orm/notification/dialog/user/company), view architecture (form, list, kanban, graph, pivot, cohort, calendar, activity, hierarchy via web_hierarchy), field widgets, domains/search facets, settings form, asset bundling (web.assets_*), and web_tour for guided tours.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "Testing and QA Infrastructure",
+      "purpose": "Document odoo/tests (TransactionCase, HttpCase, SavepointCase, tagged(), test tags, form helper, js tours via web_tour), the odoo/addons/test_* suite (test_http, test_inherit*, test_lint, test_translation, test_uninstall, test_main_flows, test_new_api coverage), JS/hoot test conventions in addons/*/static/tests, lint config (ruff.toml) and CI entry points.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "Upgrades and Migrations",
+      "purpose": "Document odoo/upgrade and odoo/upgrade_code (code upgrade tooling), module-level migration scripts (migrations/<version>/ pre/post/end hooks), neutralization (odoo/modules/neutralize.py) for test databases, and how version bumps in __manifest__.py trigger upgrade scripts.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "Packaging, Documentation and Repo Tooling",
+      "purpose": "Document doc/ (RST developer docs, howtos, reference), setup/ and debian/ packaging, setup.py/setup.cfg/requirements.txt/MANIFEST.in distribution, ruff.toml lint config, CONTRIBUTING/SECURITY files, .github workflows, and the skills/ directory.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "Business Applications",
+      "purpose": "Hub page for the addons/ directory (~640 modules): explain the shared addon anatomy (models, views, security, data/demo, wizards, controllers, static, i18n, tests), how bridge modules (<app1>_<app2>) glue apps together, and index the domain pages below.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "Accounting and Finance",
+      "purpose": "Document addons/account* — the account addon (account.move journal entries, account.move.line double-entry lines, journals, taxes, reconciliation, bank statements, payments, fiscal positions, follow-ups), account_edi*/account_edi_ubl_cii/account_peppol e-invoicing and EDI proxy client, account_check_printing, account_debit_note, account_payment, account_qr_code_*, analytic accounting, and account_* glue modules (account_fleet, account_sms, ...). Cover storno/negative-amount posting and cash-basis tax exigibility.",
+      "parent": "Business Applications"
+    },
+    {
+      "title": "Sales and CRM",
+      "purpose": "Document sale (quotations, sale.order/lines, pricelists, invoicing policy) and crm (leads/opportunities, pipeline stages, activities, teams, lead scoring/enrichment via iap), plus the sale_* / crm_* bridge and extension modules (sale_stock, sale_crm, sale_loyalty, sale_project, sale_timesheet, sale_margin, sale_gelato, crm_iap_*, crm_livechat, crm_mail_plugin, partnership, membership).",
+      "parent": "Business Applications"
+    },
+    {
+      "title": "Purchase and Procurement",
+      "purpose": "Document purchase (RFQs, purchase.order, vendor pricelists, receipts, vendor bills, three-way matching) and the purchase_* family (purchase_requisition agreements/calls for tenders, purchase_alternative*, purchase_edi_ubl_bis3, purchase_mrp, purchase_repair, purchase_stock, purchase_product_matrix).",
+      "parent": "Business Applications"
+    },
+    {
+      "title": "Inventory and Logistics",
+      "purpose": "Document stock (warehouses, locations, stock.move/picking/quant, putaway routes, push/pull rules, replenishment, lots/serial numbers, reordering rules) and the stock_* extensions (stock_account valuation, stock_delivery carriers, stock_dropshipping, stock_landed_costs, stock_fleet, stock_maintenance, stock_picking_*, stock_sms), plus uom, product* (product variants, expiry, matrix, margin), barcodes, delivery_* and repair.",
+      "parent": "Business Applications"
+    },
+    {
+      "title": "Manufacturing and Maintenance",
+      "purpose": "Document mrp (bills of materials, manufacturing orders, workorders/work centers, routings, byproducts, kit/phantom BoMs, unbuild orders, PLM/eco basics) and the mrp_* family (mrp_account costing, mrp_subcontracting, mrp_landed_costs, mrp_repair, mrp_product_expiry, mrp_delivery), plus maintenance (equipment, preventive/corrective requests) and repair flows.",
+      "parent": "Business Applications"
+    },
+    {
+      "title": "Point of Sale",
+      "purpose": "Document point_of_sale — the offline-first OWL POS app (pos.session, pos.order, product sync, cashier flows, receipts) — and the pos_* ecosystem: pos_restaurant (floors/tables), pos_self_order (QR/kiosk), pos_hr, pos_loyalty, pos_event, pos_sms, pos_online_payment*, pos_discount, pos_sale, and hardware/payment terminal integrations (pos_adyen, pos_stripe, pos_razorpay, pos_pine_labs, pos_viva_com, pos_bancontact_pay, pos_cashdro, pos_cashmatic, pos_dpopay, pos_paytm).",
+      "parent": "Business Applications"
+    },
+    {
+      "title": "Website, CMS and eCommerce",
+      "purpose": "Document website (pages, menus, themes, SEO, visitor tracking, website-specific COW views) and the visual editing stack (html_builder, html_editor — the in-page editor replacing web_editor), plus the website_* family: website_sale online store (product catalog, cart, checkout, delivery/payment integration), website_blog, website_forum, website_slides eLearning, website_event*, website_crm*, website_hr_recruitment, website_livechat, website_mass_mailing, website_payment, website_partner_assign/customer, website_profile, website_cf_turnstile and website_*_collect/robots helpers.",
+      "parent": "Business Applications"
+    },
+    {
+      "title": "Marketing, Events and Surveys",
+      "purpose": "Document mass_mailing* (campaigns, mailing lists, A/B tests, mass_mailing_themes), survey* (quizzes, certifications, live sessions), event* (event management, tracks, booths, registration, event_booth/event_sale bridges), marketing glue (utm tracking, link_tracker, social_* none exist — check what is present), sms messaging, snailmail* physical letters, gamification challenges and digest_* scheduled digests.",
+      "parent": "Business Applications"
+    },
+    {
+      "title": "HR and Workforce",
+      "purpose": "Document the hr core (employees, departments, job positions, hr.employee public/private profiles) and hr_* extensions: hr_attendance, hr_calendar, hr_expense (expense reports + approvals), hr_holidays (time off, allocations), hr_homeworking, hr_org_chart, hr_recruitment (applicants pipeline), hr_skills (resumes/skills), hr_contract*, hr_work_entry*, hr_fleet, plus fleet (vehicles), lunch (food orders), gamification_hr_org_chart bridges and attendance kiosk.",
+      "parent": "Business Applications"
+    },
+    {
+      "title": "Project, Timesheets and Services",
+      "purpose": "Document project (projects, tasks, stages, milestones, burndown, project_todo), hr_timesheet* (timesheet capture on tasks/attendance), sale_timesheet (billable time invoicing), and the project_* bridges (project_account, project_hr_expense, project_hr_skills, project_mail_plugin, project_mrp*, project_purchase, project_sale, project_sms, project_stock).",
+      "parent": "Business Applications"
+    },
+    {
+      "title": "Payments and EDI Providers",
+      "purpose": "Document the payment framework (payment.provider/acquirer abstraction, payment.transaction lifecycle, tokens) and the payment_* provider modules (adyen, aps, asiapay, authorize, buckaroo, custom, demo, dpo, ecpay, flutterwave, mercado_pago, mollie, payulatam, razorpay, sagepay, stripe, worldline, xendit, ...), plus account_payment* (provider → invoice linkage) and the e-invoicing exchange layer (account_edi_proxy_client, account_peppol, account_edi_ubl_cii).",
+      "parent": "Business Applications"
+    },
+    {
+      "title": "Discuss, Mail and Livechat",
+      "purpose": "Document mail (mail.thread follower/chatter mixin, mail.message, subtypes, notifications, activities), bus (longpolling/websocket presence + bus.bus channels), im_livechat (website live support), mail_bot, mail_group (mailing-list groups), mail_plugin (Outlook/Gmail inbox plugins), digest, phone_validation, sms, contacts (partner management UI) and portal* (customer portal access, portal_rating, portal_discuss).",
+      "parent": "Business Applications"
+    },
+    {
+      "title": "Productivity, Spreadsheet and Reporting Apps",
+      "purpose": "Document spreadsheet and spreadsheet_dashboard* (ODOO spreadsheet engine: pivot/list/chart data sources, dashboard sharing per app), calendar*, resource* (working hours/calendars shared by mrp/hr/project), rating (satisfaction ratings), data_recycle (record dedup/cleanup rules), onboard/onboarding flows, base_automation automated actions, utm/link_tracker marketing helpers, partnership and contacts-adjacent utilities.",
+      "parent": "Business Applications"
+    },
+    {
+      "title": "Integrations and External Services",
+      "purpose": "Document authentication and identity modules (auth_ldap, auth_oauth, auth_signup, auth_totp, auth_passkey*, auth_password_policy*, auth_timeout), Google integrations (google_calendar, google_drive, google_gmail, google_recaptcha, google_spreadsheet, google_address_autocomplete), Microsoft integrations (microsoft_calendar, microsoft_outlook, microsoft_azure), iap* in-app purchases (partner_autocomplete, crm enrich/mine, mail reveal), cloud_storage* (attachment storage on Azure/Google), base_geolocalize, base_import (CSV/XLSX import), base_import_module and base_install_request.",
+      "parent": "Business Applications"
+    },
+    {
+      "title": "Localizations (l10n_*)",
+      "purpose": "Document the 229 l10n_* country localization modules collectively: the shared structure (chart of accounts templates, taxes, fiscal positions, bank info, reports) and the families by concern — CoA localizations (l10n_us, l10n_de, l10n_fr, ...), e-invoicing/EDI mandates (l10n_*_edi, UBL/CFDI/Factur-X/KSeF etc.), payroll/reporting variants, and how a localization module plugs into account via load-translations hooks.",
+      "parent": "Business Applications"
+    },
+    {
+      "title": "IoT and Hardware",
+      "purpose": "Document iot_drivers (the IoT box driver framework: device detection, driver interface, websocket bridge to the server) and iot_webserial (browser-side serial device access), plus how POS and other addons consume IoT devices (printers, scales, payment terminals).",
+      "parent": "Business Applications"
+    }
+  ]
+}
