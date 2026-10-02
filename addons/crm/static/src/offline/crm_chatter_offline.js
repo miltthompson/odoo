@@ -57,18 +57,48 @@ patch(Thread.prototype, {
             });
             return;
         }
-        // Build the same post_data the online path sends: mentions plus
-        // suggested/additional recipients, subtype, mentions tokens, etc.
-        postData.attachments = [];
-        const params = await this.store.getMessagePostParams({
-            body,
-            postData,
+        // Merge recipients the way getMessagePostParams does — mentions plus
+        // suggested/additional recipients — but keep only kwargs the ORM
+        // message_post accepts: the mail route resolves partner_emails,
+        // partner_cc_emails, role_ids and mention tokens server-side, and the
+        // ORM rejects them on replay.
+        const validMentions = this.store.getMentionsFromText(body, {
+            mentionedPartners: postData.mentionedPartners,
+            mentionedRoles: postData.mentionedRoles,
             thread: this,
         });
-        const kwargs = { ...params.post_data, ...extraData };
-        if (postData.parentId) {
-            kwargs.parent_id = postData.parentId;
+        const partnerIds = validMentions?.partners.map((partner) => partner.id) ?? [];
+        const partnerCcIds = [];
+        if (!postData.isNote) {
+            for (const recipient of [
+                ...(this.suggestedRecipients ?? []),
+                ...(this.additionalRecipients ?? []),
+            ]) {
+                // Email-only suggestions resolve to partners in the route:
+                // they can't be queued, only real partners are kept.
+                if (!recipient.persona) {
+                    continue;
+                }
+                if (recipient.recipient_type === "cc") {
+                    partnerCcIds.push(recipient.persona.id);
+                } else {
+                    partnerIds.push(recipient.persona.id);
+                }
+            }
         }
+        const kwargs = {
+            body: String(body),
+            message_type: "comment",
+            subtype_xmlid: postData.isNote ? "mail.mt_note" : "mail.mt_comment",
+            ...(partnerIds.length && { partner_ids: partnerIds }),
+            ...(partnerCcIds.length && { partner_cc_ids: partnerCcIds }),
+            ...(postData.subject && { subject: postData.subject }),
+            ...(postData.emailAddSignature && {
+                email_add_signature: postData.emailAddSignature,
+            }),
+            ...(postData.parentId && { parent_id: postData.parentId }),
+            ...extraData,
+        };
         offline.scheduleORM("crm.lead", "message_post", [[this.id]], kwargs, {
             extras: {
                 timeStamp: Date.now(),

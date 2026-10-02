@@ -1,6 +1,3 @@
-import { usePlugin } from "@odoo/owl";
-import { OfflinePlugin } from "@web/core/offline/offline_plugin";
-
 // Read methods whose results can safely come from the encrypted IDB disk cache.
 // Anything not listed here (writes, custom calls) goes straight to the server and
 // fails normally while offline.
@@ -32,12 +29,10 @@ const READ_METHODS = new Set([
  */
 export function offlineCachedModel(BaseModel) {
     return class OfflineCachedModel extends BaseModel {
-        offlinePlugin = usePlugin(OfflinePlugin);
-
         setup(params, services) {
             super.setup(...arguments);
             const orm = this.orm;
-            const offlinePlugin = this.offlinePlugin;
+            const offlineService = this.env.services.offline;
             this.orm = Object.assign(Object.create(orm), {
                 call(model, method, args = [], kwargs = {}) {
                     if (!READ_METHODS.has(method)) {
@@ -51,7 +46,7 @@ export function offlineCachedModel(BaseModel) {
                             // While online always fetch fresh data (which still
                             // updates the disk cache for offline use); read the
                             // cache only while offline.
-                            noCache: !offlinePlugin.isOffline(),
+                            noCache: !offlineService?.offline,
                         })
                         .call(model, method, args, kwargs);
                 },
@@ -63,7 +58,7 @@ export function offlineCachedModel(BaseModel) {
             const { actionId, viewType } = this.env.config;
             const search = this.env.searchModel?.getCurrentSearch?.();
             if (actionId && search) {
-                this.offlinePlugin.setAvailableOffline(actionId, viewType, { search });
+                this.env.services.offline?.setAvailableOffline(actionId, viewType, { search });
             }
             return res;
         }
