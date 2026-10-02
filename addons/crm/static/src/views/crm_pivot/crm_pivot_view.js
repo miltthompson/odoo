@@ -1,10 +1,12 @@
 import { CrmControlPanel } from "@crm/views/crm_control_panel";
 import { CrmSearchModel } from "@crm/views/crm_search_model";
 import { pivotView } from "@web/views/pivot/pivot_view";
+import { offlineCachedModel } from "@crm/offline/offline_cached_model";
 import { registry } from "@web/core/registry";
 
 export const crmPivotView = {
     ...pivotView,
+    Model: offlineCachedModel(pivotView.Model),
     ControlPanel: CrmControlPanel,
     SearchModel: CrmSearchModel,
 };
