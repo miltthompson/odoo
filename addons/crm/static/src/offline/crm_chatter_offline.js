@@ -20,7 +20,16 @@ patch(Chatter.prototype, {
             }
             this.rootRef()
                 ?.querySelectorAll(OFFLINE_CHATTER_BUTTONS)
-                .forEach((el) => el.setAttribute("data-available-offline", ""));
+                .forEach((el) => {
+                    el.setAttribute("data-available-offline", "");
+                    // When the chatter mounts while already offline, the
+                    // offline-disable pass ran before this tag lands; undo it
+                    // the same way the plugin's own re-enable pass does.
+                    if (el.classList.contains("o_disabled_offline")) {
+                        el.removeAttribute("disabled");
+                        el.classList.remove("o_disabled_offline");
+                    }
+                });
         };
         onMounted(enableOfflineButtons);
         onPatched(enableOfflineButtons);

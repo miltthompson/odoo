@@ -1,4 +1,4 @@
-import { Component, t, usePlugin, useProps, useState } from "@odoo/owl";
+import { Component, proxy, t, usePlugin, useProps } from "@odoo/owl";
 
 import { browser } from "@web/core/browser/browser";
 import { makeContext } from "@web/core/context";
@@ -33,7 +33,7 @@ class OfflineLostReasonDialog extends Component {
         onConfirm: t.function(),
     });
     setup() {
-        this.state = useState({ reasonId: "", feedback: "" });
+        this.state = proxy({ reasonId: "", feedback: "" });
     }
     confirm() {
         this.props.onConfirm({
