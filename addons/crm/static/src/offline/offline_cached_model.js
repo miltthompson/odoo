@@ -37,13 +37,22 @@ export function offlineCachedModel(BaseModel) {
         setup(params, services) {
             super.setup(...arguments);
             const orm = this.orm;
+            const offlinePlugin = this.offlinePlugin;
             this.orm = Object.assign(Object.create(orm), {
                 call(model, method, args = [], kwargs = {}) {
                     if (!READ_METHODS.has(method)) {
                         return orm.call(model, method, args, kwargs);
                     }
                     return orm
-                        .cache({ ...(this._cache || {}), type: "disk" })
+                        .cache({
+                            ...(this._cache || {}),
+                            type: "disk",
+                            update: "always",
+                            // While online always fetch fresh data (which still
+                            // updates the disk cache for offline use); read the
+                            // cache only while offline.
+                            noCache: !offlinePlugin.isOffline(),
+                        })
                         .call(model, method, args, kwargs);
                 },
             });

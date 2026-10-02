@@ -128,7 +128,8 @@ test("offline: message_post on crm.lead thread is queued as note", async () => {
     expect(posts[0].model).toBe("crm.lead");
     expect(posts[0].args).toEqual([[1]]);
     expect(posts[0].kwargs.subtype_xmlid).toBe("mail.mt_note");
-    expect(posts[0].kwargs.body).toBe("<p>my note</p>");
+    expect(posts[0].kwargs.message_type).toBe("comment");
+    expect(String(posts[0].kwargs.body)).toBe("<p>my note</p>");
 });
 
 test("offline: message_post with attachments is refused", async () => {

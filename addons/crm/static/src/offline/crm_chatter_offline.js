@@ -57,16 +57,17 @@ patch(Thread.prototype, {
             });
             return;
         }
-        const kwargs = {
-            body: String(body),
-            message_type: "comment",
-            subtype_xmlid: postData.isNote ? "mail.mt_note" : "mail.mt_comment",
-        };
-        if (postData.subject) {
-            kwargs.subject = postData.subject;
-        }
-        if (postData.mentionedPartners?.length) {
-            kwargs.partner_ids = postData.mentionedPartners.map((partner) => partner.id);
+        // Build the same post_data the online path sends: mentions plus
+        // suggested/additional recipients, subtype, mentions tokens, etc.
+        postData.attachments = [];
+        const params = await this.store.getMessagePostParams({
+            body,
+            postData,
+            thread: this,
+        });
+        const kwargs = { ...params.post_data, ...extraData };
+        if (postData.parentId) {
+            kwargs.parent_id = postData.parentId;
         }
         offline.scheduleORM("crm.lead", "message_post", [[this.id]], kwargs, {
             extras: {
