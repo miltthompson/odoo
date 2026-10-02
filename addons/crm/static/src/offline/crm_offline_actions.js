@@ -1,4 +1,4 @@
-import { Component, usePlugin, useState } from "@odoo/owl";
+import { Component, t, usePlugin, useProps, useState } from "@odoo/owl";
 
 import { browser } from "@web/core/browser/browser";
 import { makeContext } from "@web/core/context";
@@ -27,11 +27,11 @@ const OFFLINE_METHODS = new Set([
 class OfflineLostReasonDialog extends Component {
     static template = "crm.OfflineLostReasonDialog";
     static components = { Dialog };
-    static props = {
-        close: Function,
-        reasons: { type: Array },
-        onConfirm: { type: Function },
-    };
+    props = useProps({
+        close: t.function(),
+        reasons: t.array(t.object()),
+        onConfirm: t.function(),
+    });
     setup() {
         this.state = useState({ reasonId: "", feedback: "" });
     }

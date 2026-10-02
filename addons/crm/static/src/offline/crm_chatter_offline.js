@@ -1,6 +1,31 @@
+import { onMounted, onPatched } from "@odoo/owl";
+import { Chatter } from "@mail/chatter/web_portal_project/chatter";
 import { patch } from "@web/core/utils/patch";
 import { _t } from "@web/core/l10n/translation";
 import { Thread } from "@mail/core/common/thread_model";
+
+// Buttons needed to post a note/message on a crm.lead while offline. The
+// offline framework auto-disables every button without this attribute, so the
+// queued message_post below would otherwise be unreachable. Attachments and
+// activities stay disabled on purpose: they can't be queued.
+const OFFLINE_CHATTER_BUTTONS =
+    ".o-mail-Chatter-sendMessage, .o-mail-Chatter-logNote, .o-mail-Composer-send";
+
+patch(Chatter.prototype, {
+    setup() {
+        super.setup(...arguments);
+        const enableOfflineButtons = () => {
+            if (this.threadModel?.() !== "crm.lead") {
+                return;
+            }
+            this.rootRef()
+                ?.querySelectorAll(OFFLINE_CHATTER_BUTTONS)
+                .forEach((el) => el.setAttribute("data-available-offline", ""));
+        };
+        onMounted(enableOfflineButtons);
+        onPatched(enableOfflineButtons);
+    },
+});
 
 patch(Thread.prototype, {
     async post(body, postData = {}, extraData = {}) {
