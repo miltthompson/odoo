@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates xml:space="preserve">
+    <t t-name="crm.OfflineLostDialog">
+        <Dialog title.translate="Mark Lost" size="'md'" footer="false">
+            <p class="text-muted">This will be applied once you are back online.</p>
+            <div class="mb-3">
+                <label class="col-form-label" for="crm_offline_lost_reason">Lost Reason</label>
+                <select id="crm_offline_lost_reason" class="form-select" t-model.proxy="this.state.reasonId">
+                    <option value=""></option>
+                    <t t-foreach="this.props.reasons" t-as="reason" t-key="reason.id">
+                        <option t-att-value="reason.id" t-out="reason.display_name"/>
+                    </t>
+                </select>
+            </div>
+            <div class="mb-3">
+                <label class="col-form-label" for="crm_offline_lost_feedback">Closing Note</label>
+                <textarea id="crm_offline_lost_feedback" class="form-control" rows="3"
+                    placeholder="What went wrong?" t-model.proxy="this.state.feedback"/>
+            </div>
+            <div class="d-flex justify-content-end gap-2">
+                <button class="btn btn-secondary" t-on-click="this.props.close" data-available-offline="1">Cancel</button>
+                <button class="btn btn-primary" t-on-click="this.confirm" data-available-offline="1">Mark as Lost</button>
+            </div>
+        </Dialog>
+    </t>
+</templates>

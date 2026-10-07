@@ -7,14 +7,15 @@
                 <form class="o_lead_opportunity_form" js_class="crm_form">
                     <header>
                         <button name="action_set_won_rainbowman" string="Won"
-                            type="object" class="oe_highlight" data-hotkey="w"
+                            type="object" class="oe_highlight" data-hotkey="w" data-available-offline="1"
                             invisible="won_status == 'won' or type == 'lead' or not active"/>
                         <button name="action_convert_to_opportunity" string="Convert to Opportunity" type="object"
-                            class="oe_highlight" invisible="type == 'opportunity' or not active" data-hotkey="v"/>
+                            class="oe_highlight" invisible="type == 'opportunity' or not active" data-hotkey="v"
+                            data-available-offline="1"/>
                         <button name="action_restore" string="Restore" type="object" data-hotkey="x"
-                            invisible="won_status != 'lost'"/>
+                            invisible="won_status != 'lost'" data-available-offline="1"/>
                         <button name="%(crm.crm_lead_lost_action)d" string="Lost" type="action" data-hotkey="l"
-                            invisible="won_status != 'pending' or not active"/>
+                            invisible="won_status != 'pending' or not active" data-available-offline="1"/>
                         <field name="stage_id" widget="rotting_statusbar_duration"
                             options="{'clickable': '1', 'fold_field': 'fold'}"
                             domain="['|', ('team_ids', 'in', team_id), ('team_ids', '=', False)]"
@@ -88,7 +89,7 @@
                                     <label for="probability" class="d-inline-block"/>
                                     <a class="border-0 mx-2 p-0 mb-1 mb-md-0 btn btn-light"
                                         name="action_set_automated_probability"
-                                        role="button" type="object"
+                                        role="button" type="object" data-available-offline="1"
                                         invisible="is_automated_probability or won_status == 'lost'">
                                             <img class="o_lead_opportunity_form_AI_switch_img"
                                                 title="Switch to AI-computed probabilities"
@@ -137,7 +138,7 @@
                                         <span> %</span>
                                         <a class="btn btn-link p-0"
                                             name="action_set_automated_probability"
-                                            role="button" type="object"
+                                            role="button" type="object" data-available-offline="1"
                                             invisible="is_automated_probability or won_status == 'lost'">
                                             <img class="o_lead_opportunity_form_AI_switch_img mx-1"
                                                 title="Switch to AI-computed probabilities"
@@ -321,7 +322,7 @@
                       decoration-muted="won_status == 'lost'">
                     <header>
                         <button name="%(action_crm_send_mass_convert)d" type="action" string="Convert to Opportunities"/>
-                        <button name="%(crm.crm_lead_lost_action)d" type="action" string="Mark Lost"/>
+                        <button name="%(crm.crm_lead_lost_action)d" type="action" string="Mark Lost" data-available-offline="1"/>
                     </header>
                     <field name="company_id" column_invisible="True"/>
                     <field name="user_company_ids" column_invisible="True"/>
@@ -707,7 +708,7 @@
                 <list string="Opportunities" sample="1" multi_edit="1" js_class="crm_list"
                     decoration-muted="won_status == 'lost'">
                     <header>
-                        <button name="%(crm.crm_lead_lost_action)d" type="action" string="Mark Lost" />
+                        <button name="%(crm.crm_lead_lost_action)d" type="action" string="Mark Lost" data-available-offline="1"/>
                         <button name="%(crm.action_lead_mass_mail)d" type="action" string="Email" />
                     </header>
                     <field name="company_id" column_invisible="True"/>
