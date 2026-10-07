@@ -1,0 +1,175 @@
+{
+  "repo_notes": [
+    {
+      "content": "This is the Odoo 20.0 community repository (odoo/release.py: version_info = (20, 0, 0, FINAL), Python 3.12-3.14, LGPL-3). It has two halves: the framework in odoo/ (ORM, HTTP layer, module loader, CLI, services, tools, test framework, plus the core 'base' module in odoo/addons/base) and roughly 640 business/feature modules in addons/. Documentation should explain the framework first and in depth, then show how business apps are built on top of it. Always ground explanations in concrete file paths and class names.",
+      "author": "Repo maintainer"
+    },
+    {
+      "content": "The ORM lives in odoo/orm/ (models.py, model_classes.py, fields*.py, environments.py, registry.py, cache.py, domains.py, query.py, decorators.py, commands.py). odoo/models, odoo/fields and odoo/api are thin re-export packages over odoo/orm - describe the real implementation in odoo/orm, not the facades.",
+      "author": "Repo maintainer"
+    },
+    {
+      "content": "The web client is an Owl-based SPA in addons/web/static/src (core/, views/, model/, search/, webclient/, public/). Owl itself is vendored in addons/web/static/lib/owl, and the codebase is mid-migration from Owl 2 to Owl 3: addons/web/static/src/owl2/owl3_compatibility_layer.js and odoo/upgrade_code/owl3-migration.py are the key artifacts. JS tests use the in-house Hoot framework (addons/web/static/lib/hoot, hoot-dom) with tests under each module's static/tests.",
+      "author": "Repo maintainer"
+    },
+    {
+      "content": "Addons follow naming families that should be treated as groups rather than documented one by one: l10n_* (~229 country localizations), website_* (~52), pos_* (~45), sale_* (~29), payment_* (~24 provider integrations), hr_*, project_*, account_*, mrp_*, stock_*, spreadsheet_*, test_* (test-only modules). Bridge modules like sale_stock or project_mrp_account exist only to glue two apps together; mention the pattern, do not give each its own section.",
+      "author": "Repo maintainer"
+    },
+    {
+      "content": "The skills/ directory at the repo root contains agent Skills (odoo-guidelines, odoo-review, odoo-security, odoo-web-guidelines) that encode Odoo's official coding, review and security conventions. Use them as an authoritative source for conventions when describing how code in this repo should be written. Ignore .venv/, __pycache__/, the massive .weblate.json and i18n/*.po translation files - they carry no architectural information.",
+      "author": "Repo maintainer"
+    }
+  ],
+  "pages": [
+    {
+      "title": "Odoo Overview",
+      "purpose": "High-level map of the repository: the odoo/ framework vs. addons/ apps, odoo-bin entry point, how a request flows from HTTP to ORM to PostgreSQL and back to the Owl web client, and how modules compose into a full ERP. Include a top-level architecture diagram."
+    },
+    {
+      "title": "Server Runtime, CLI and Configuration",
+      "purpose": "Document odoo-bin and odoo/cli (server, shell, scaffold, db, module, neutralize, obfuscate, i18n, upgrade_code commands), configuration parsing in odoo/tools/config.py, and the server modes in odoo/service/server.py (threaded, prefork workers, gevent/longpolling, cron workers). Briefly cover packaging and deployment assets in setup/ (docker, rpm, win32, sandboxing, odoo-wsgi.example.py) and debian/.",
+      "parent": "Odoo Overview"
+    },
+    {
+      "title": "ORM Framework",
+      "purpose": "Overview of the object-relational mapper in odoo/orm: recordsets, the Model/TransientModel/AbstractModel hierarchy, how model classes are assembled per registry, and how reads/writes are batched and flushed to PostgreSQL.",
+      "parent": "Odoo Overview"
+    },
+    {
+      "title": "Models and Inheritance",
+      "purpose": "Document odoo/orm/models.py, model_classes.py, models_transient.py and models_cached.py: _name/_inherit/_inherits semantics (classical, prototype and delegation inheritance), CRUD methods (create, read, write, unlink, search, web_read/web_search_read), name_search/rec_names_search, and SQL constraints/indexes via table_objects.py.",
+      "parent": "ORM Framework"
+    },
+    {
+      "title": "Fields, Computes and Constraints",
+      "purpose": "Document the field type system across odoo/orm/fields*.py (numeric, textual, temporal, selection, relational, reference, binary, properties, misc), x2many write commands in commands.py, and the decorators in decorators.py (api.depends, api.onchange, api.constrains, api.model, api.ondelete). Explain stored vs. non-stored computes, inverse/search methods, related fields and company-dependent fields.",
+      "parent": "ORM Framework"
+    },
+    {
+      "title": "Environment, Registry and Caching",
+      "purpose": "Document odoo/orm/environments.py (Environment, context, sudo/with_user/with_company), registry.py and odoo/modules/registry (per-database model registry, signaling between workers), the record cache in cache.py, field invalidation/recompute triggers, and tools/cache (ormcache decorators).",
+      "parent": "ORM Framework"
+    },
+    {
+      "title": "Domains, Queries and SQL",
+      "purpose": "Document domain parsing and optimization in odoo/orm/domains.py, the Query builder in query.py, the SQL wrapper types in odoo/tools/sql.py, and cursor/connection pooling in odoo/sql_db.py. Explain how search domains become SQL including joins over many2one/x2many and access-rule injection.",
+      "parent": "ORM Framework"
+    },
+    {
+      "title": "Module System and Data Loading",
+      "purpose": "Document how addons are discovered and installed: __manifest__.py keys, dependency graph in odoo/modules/module_graph.py, loading order in loading.py, module state in module.py/ir_module.py, XML/CSV data import in odoo/tools/convert.py validated by odoo/import_xml.rng, noupdate records, demo data, and pre/post/end migration scripts in odoo/modules/migration.py.",
+      "parent": "Odoo Overview"
+    },
+    {
+      "title": "Upgrade and Code Migration Tooling",
+      "purpose": "Document odoo/upgrade_code/ scripts (e.g. tree-to-list, sql-constraint, route-jsonrpc, t-call, ir-access, owl3-migration) and the 'odoo-bin upgrade_code' command in odoo/cli/upgrade_code.py, plus odoo/upgrade. Explain how these scripts rewrite Python/XML/JS source between versions and how to write a new one.",
+      "parent": "Module System and Data Loading"
+    },
+    {
+      "title": "HTTP Layer and Routing",
+      "purpose": "Document odoo/http (router.py, routing_map.py, dispatcher.py, requestlib.py, response.py, session.py, stream.py, retrying.py, server.py): the @route decorator, http vs. json/jsonrpc route types, auth modes (user, public, none, bearer), session handling, request retry on serialization failure, and how ir.http (odoo/addons/base/models/ir_http.py) plugs into dispatch. Also cover the RPC services in odoo/service.",
+      "parent": "Odoo Overview"
+    },
+    {
+      "title": "Security Model",
+      "purpose": "Document users and groups (res_users.py, res_groups.py, res_groups_privilege.py), model access via ir_access.py (the 19.4+ replacement for ir.model.access), record rules, field-level groups, sudo semantics, multi-company isolation, safe_eval in odoo/tools/safe_eval, and process sandboxing in setup/sandboxing. Reference the conventions in skills/odoo-security.",
+      "parent": "Odoo Overview"
+    },
+    {
+      "title": "Base Module and Technical Models",
+      "purpose": "Document odoo/addons/base: the ir.* technical models (ir_model, ir_ui_menu, ir_actions, ir_cron, ir_attachment, ir_config_parameter, ir_sequence, ir_default, ir_filters, ir_mail_server, ir_autovacuum, ir_profile) and core res.* models (res_partner, res_company, res_currency, res_country, res_lang, res_config settings).",
+      "parent": "Odoo Overview"
+    },
+    {
+      "title": "Views, QWeb and Reports",
+      "purpose": "Document server-side view architecture in ir_ui_view.py (view types, inheritance via xpath in odoo/tools/template_inheritance.py, view validation in view_validation.py), the QWeb engine in ir_qweb.py and ir_qweb_fields.py, PDF reporting in ir_actions_report.py with base_report_wkhtmltox and base_report_paper_muncher, and translations in odoo/tools/translate.py.",
+      "parent": "Base Module and Technical Models"
+    },
+    {
+      "title": "Asset Bundles and JS Module System",
+      "purpose": "Document asset declaration in manifests and ir_asset.py, bundle compilation in odoo/addons/base/models/assetsbundle.py (SCSS, JS, XML templates, sourcemaps via odoo/tools/sourcemap_generator.py), the ES module transpiler in odoo/tools/js_transpiler.py, and the browser-side loader in addons/web/static/src/module_loader.js.",
+      "parent": "Base Module and Technical Models"
+    },
+    {
+      "title": "Web Client Framework",
+      "purpose": "Overview of the Owl-based web client in addons/web/static/src: boot sequence (start.js, main.js, env.js, session.js), the webclient shell, action manager, and how server-side views/actions are rendered client-side. Cover the Owl 2 to Owl 3 migration and the compatibility layer in static/src/owl2.",
+      "parent": "Odoo Overview"
+    },
+    {
+      "title": "Core Services, Registries and Components",
+      "purpose": "Document addons/web/static/src/core: the registry system (registry.js), service definitions (services.js, orm, rpc/network, notification, dialog, hotkeys, ui, user, field_service, name_service), reusable components (dropdown, autocomplete, datetime, domain_selector, popover, tree_editor), py_js expression evaluation, and l10n.",
+      "parent": "Web Client Framework"
+    },
+    {
+      "title": "Client Views and Relational Model",
+      "purpose": "Document addons/web/static/src/views (form, list, kanban, calendar, graph, pivot, card, view_compiler.js, fields/ widgets) and the data layer in static/src/model (model.js, record.js, relational_model/) including how onchange, save and x2many editing round-trip to the server. Include web_hierarchy.",
+      "parent": "Web Client Framework"
+    },
+    {
+      "title": "Search, Actions and Frontend Interactions",
+      "purpose": "Document addons/web/static/src/search (control panel, search model, filters, group-bys, favorites), the action service and client actions under webclient/, public/frontend interactions in static/src/public used by website/portal, and guided tours in web_tour. Reference skills/odoo-web-guidelines for conventions.",
+      "parent": "Web Client Framework"
+    },
+    {
+      "title": "HTML Editor and Website Builder",
+      "purpose": "Document the plugin-based rich text editor in addons/html_editor and the drag-and-drop builder in addons/html_builder, how website uses them for in-page editing, and how HTML fields are sanitized and stored (odoo/tools/mail.py html_sanitize).",
+      "parent": "Web Client Framework"
+    },
+    {
+      "title": "Spreadsheet and Dashboards",
+      "purpose": "Document addons/spreadsheet (the o-spreadsheet integration, data sources bound to ORM models, pivot/list/chart functions) and the spreadsheet_dashboard family that ships per-app dashboards.",
+      "parent": "Web Client Framework"
+    },
+    {
+      "title": "Messaging, Discuss and Bus",
+      "purpose": "Document addons/mail (mail.thread and mail.activity.mixin, chatter, followers, mail templates, outgoing/incoming mail gateway, tracking), addons/bus (longpolling/websocket notifications via bus.bus and the websocket worker), Discuss channels, im_livechat, and mail_bot.",
+      "parent": "Odoo Overview"
+    },
+    {
+      "title": "Accounting and Invoicing",
+      "purpose": "Document addons/account: journals, account.move/account.move.line, taxes and tax computation, reconciliation, payments (account_payment), fiscal positions, chart of accounts templates, and electronic invoicing (account_edi, account_edi_ubl_cii, account_peppol, account_edi_proxy_client).",
+      "parent": "Odoo Overview"
+    },
+    {
+      "title": "Localizations",
+      "purpose": "Document the l10n_* module family (~229 modules): how a country module provides a chart template, taxes, fiscal positions and legal reports on top of account; country-specific EDI/e-invoicing (e.g. l10n_in_edi, l10n_fr_pdp, l10n_fr_facturx_chorus_pro); and localization bridges into POS, HR and stock. Use a few representative countries (l10n_fr, l10n_in, l10n_be, l10n_us) as worked examples.",
+      "parent": "Accounting and Invoicing"
+    },
+    {
+      "title": "Sales, CRM and Loyalty",
+      "purpose": "Document crm (leads, opportunities, pipeline, sales_team), sale and sale_management (quotations, sale orders, order lines, invoicing policy), product configuration (product, product variants, sale_product_matrix), and loyalty/coupons (loyalty, sale_loyalty). Explain how sale_* bridge modules connect sales to stock, project, purchase and timesheets.",
+      "parent": "Odoo Overview"
+    },
+    {
+      "title": "Inventory, Purchase and Manufacturing",
+      "purpose": "Document stock (warehouses, locations, stock.picking, stock.move/stock.move.line, routes and rules, procurement, valuation in stock_account, landed costs, delivery carriers), purchase (RFQs, vendor bills, purchase_stock), and mrp (BoMs, manufacturing orders, work orders, subcontracting, repair).",
+      "parent": "Odoo Overview"
+    },
+    {
+      "title": "Point of Sale",
+      "purpose": "Document addons/point_of_sale: the standalone Owl POS frontend and its offline-capable data layer, sessions and order sync to the backend, payment terminal integrations (pos_adyen, pos_stripe, pos_viva_com, etc.), pos_restaurant, pos_self_order kiosk/mobile ordering, and IoT box support (setup/iot_box_builder).",
+      "parent": "Odoo Overview"
+    },
+    {
+      "title": "Website, eCommerce and Portal",
+      "purpose": "Document addons/website (multi-website, pages, menus, themes, SEO, website controllers), website_sale (shop, cart, checkout), portal (customer portal access and documents), and the major website_* families (blog, forum, slides/eLearning, events). Show how website routes extend the HTTP layer and QWeb.",
+      "parent": "Odoo Overview"
+    },
+    {
+      "title": "Payment Providers",
+      "purpose": "Document the payment framework in addons/payment (payment.provider, payment.transaction, payment.token, payment methods, the checkout form and webhook flow) and how payment_* modules (stripe, adyen, paypal, mollie, razorpay, etc.) implement provider-specific hooks.",
+      "parent": "Website, eCommerce and Portal"
+    },
+    {
+      "title": "HR and Project Management",
+      "purpose": "Document hr (employees, departments, contracts, work entries), hr_holidays, hr_attendance, hr_expense, hr_recruitment, hr_skills, resource calendars, project and project tasks, hr_timesheet, and sale_timesheet billing.",
+      "parent": "Odoo Overview"
+    },
+    {
+      "title": "Testing Framework",
+      "purpose": "Document the Python test framework in odoo/tests (case.py: TransactionCase, HttpCase, SavepointCase semantics; form.py Form emulator; tag_selector.py and --test-tags; loader.py), the test_* addons in odoo/addons and addons/, browser tours via web_tour, and JS unit tests with Hoot (addons/web/static/lib/hoot, addons/web/static/tests, mock_server). Explain how to run each kind of test.",
+      "parent": "Odoo Overview"
+    }
+  ]
+}

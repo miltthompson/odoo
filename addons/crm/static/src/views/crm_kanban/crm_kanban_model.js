@@ -24,8 +24,14 @@ export class CrmKanbanDynamicGroupList extends RelationalModel.DynamicGroupList 
 
         await super.moveRecords(...arguments);
 
-        if (targetGroup && movedLeads.length && this.groupByField.name === "stage_id") {
-            // a single message, even when several leads were moved at once
+        if (
+            targetGroup &&
+            movedLeads.length &&
+            this.groupByField.name === "stage_id" &&
+            !this.model.offlinePlugin.isOffline()
+        ) {
+            // a single message, even when several leads were moved at once;
+            // offline the save is queued: no immediate effect to display
             await checkRainbowmanMessage(this.model.orm, this.model.effect, movedLeads[0].resId);
         }
     }

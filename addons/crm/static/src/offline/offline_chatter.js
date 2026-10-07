@@ -1,0 +1,123 @@
+import { onMounted, onPatched } from "@odoo/owl";
+import { Chatter } from "@mail/chatter/web_portal_project/chatter";
+import { generateEmojisOnHtml } from "@mail/utils/common/format";
+import { patch } from "@web/core/utils/patch";
+import { _t } from "@web/core/l10n/translation";
+import { Thread } from "@mail/core/common/thread_model";
+
+// Buttons needed to post a note/message on a crm.lead while offline. The
+// offline framework auto-disables every button without this attribute, so the
+// queued message_post below would otherwise be unreachable. Attachments and
+// activities stay disabled on purpose: they can't be queued.
+const OFFLINE_CHATTER_BUTTONS =
+    ".o-mail-Chatter-sendMessage, .o-mail-Chatter-logNote, .o-mail-Composer-send";
+
+patch(Chatter.prototype, {
+    setup() {
+        super.setup(...arguments);
+        const enableOfflineButtons = () => {
+            if (this.threadModel?.() !== "crm.lead") {
+                return;
+            }
+            this.rootRef()
+                ?.querySelectorAll(OFFLINE_CHATTER_BUTTONS)
+                .forEach((el) => {
+                    el.setAttribute("data-available-offline", "");
+                    // When the chatter mounts while already offline, the
+                    // offline-disable pass ran before this tag lands; undo it
+                    // the same way the plugin's own re-enable pass does.
+                    if (el.classList.contains("o_disabled_offline")) {
+                        el.removeAttribute("disabled");
+                        el.classList.remove("o_disabled_offline");
+                    }
+                });
+        };
+        onMounted(enableOfflineButtons);
+        onPatched(enableOfflineButtons);
+    },
+});
+
+patch(Thread.prototype, {
+    async post(body, postData = {}, extraData = {}) {
+        const offline = this.store.env.services.offline;
+        if (this.model !== "crm.lead" || !offline?.offline) {
+            return super.post(...arguments);
+        }
+        const notification = this.store.env.services.notification;
+        // Records created offline have no real id yet and attachments go through
+        // an upload route: neither can be queued.
+        if (!Number.isInteger(this.id) || this.id <= 0) {
+            notification.add(_t("You need to be online to post on this record."), {
+                type: "warning",
+            });
+            return;
+        }
+        if (postData.attachments?.length) {
+            notification.add(_t("Attachments can't be sent while offline."), {
+                type: "warning",
+            });
+            return;
+        }
+        // Merge recipients the way getMessagePostParams does — mentions plus
+        // suggested/additional recipients — but keep only kwargs the ORM
+        // message_post accepts: the mail route resolves partner_emails,
+        // partner_cc_emails, role_ids and mention tokens server-side, and the
+        // ORM rejects them on replay.
+        const validMentions = this.store.getMentionsFromText(body, {
+            mentionedPartners: postData.mentionedPartners,
+            mentionedRoles: postData.mentionedRoles,
+            thread: this,
+        });
+        const partnerIds = validMentions?.partners.map((partner) => partner.id) ?? [];
+        const partnerCcIds = [];
+        if (!postData.isNote) {
+            for (const recipient of [
+                ...(this.suggestedRecipients ?? []),
+                ...(this.additionalRecipients ?? []),
+            ]) {
+                // Cc recipients are only added when the composer Cc field is on.
+                if (!postData.isCcEnabled && recipient.recipient_type === "cc") {
+                    continue;
+                }
+                // Email-only suggestions resolve to partners in the route:
+                // they can't be queued, only real partners are kept.
+                if (!recipient.persona) {
+                    continue;
+                }
+                if (recipient.recipient_type === "cc") {
+                    partnerCcIds.push(recipient.persona.id);
+                } else {
+                    partnerIds.push(recipient.persona.id);
+                }
+            }
+        }
+        const kwargs = {
+            // no emoji loading while offline (it fetches over the network):
+            // already-loaded emojis still get converted
+            body: await generateEmojisOnHtml(body, { allowEmojiLoading: false }),
+            message_type: "comment",
+            subtype_xmlid: postData.isNote ? "mail.mt_note" : "mail.mt_comment",
+            ...(partnerIds.length && { partner_ids: partnerIds }),
+            ...(partnerCcIds.length && { partner_cc_ids: partnerCcIds }),
+            ...(postData.subject && { subject: postData.subject }),
+            ...(postData.emailAddSignature && {
+                email_add_signature: postData.emailAddSignature,
+            }),
+            ...(postData.parentId && { parent_id: postData.parentId }),
+            ...extraData,
+        };
+        const action = this.store.env.services.action;
+        offline.scheduleORM("crm.lead", "message_post", [[this.id]], kwargs, {
+            extras: {
+                actionId: action?.currentAction?.id,
+                actionName: action?.currentAction?.name,
+                viewType: action?.currentController?.props?.type,
+                timeStamp: Date.now(),
+                displayName: this.display_name || _t("Lead %(id)s", { id: this.id }),
+            },
+        });
+        notification.add(_t("Saved: your message will be posted once back online."), {
+            type: "info",
+        });
+    },
+});
