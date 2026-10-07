@@ -1,4 +1,4 @@
-import { Component, proxy, t, usePlugin, useProps } from "@odoo/owl";
+import { Component, onWillStart, proxy, t, usePlugin, useProps } from "@odoo/owl";
 
 import { browser } from "@web/core/browser/browser";
 import { makeContext } from "@web/core/context";
@@ -9,6 +9,7 @@ import { rpcBus } from "@web/core/network/rpc";
 import { NotificationPlugin } from "@web/core/notifications/notification_plugin";
 import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { ORM } from "@web/core/orm_plugin";
+import { registry } from "@web/core/registry";
 import { patch } from "@web/core/utils/patch";
 import { session } from "@web/session";
 import { ActionPlugin } from "@web/webclient/actions/action_plugin";
@@ -193,3 +194,28 @@ patch(ActionPlugin.prototype, {
         };
     },
 });
+
+// Badge shown on queued calls the systray has no status for (e.g. the
+// method/action calls CRM schedules while offline).
+const QUEUED_STATUS = { label: _t("Queued"), color: 0 };
+
+const OfflineSystray = registry.category("systray").get("offline")?.Component;
+if (OfflineSystray) {
+    patch(OfflineSystray.prototype, {
+        setup() {
+            super.setup(...arguments);
+            onWillStart(() => {
+                // groupEntries only sets a status for the methods it knows
+                // (web_save, unlink, archive); every other queued method
+                // produces items without a status and its template reads
+                // status.color/label unconditionally, crashing the dropdown.
+                const groupEntries = this.groupEntries;
+                this.groupEntries = () =>
+                    groupEntries().map(([name, items]) => [
+                        name,
+                        items.map((item) => ({ ...item, status: item.status ?? QUEUED_STATUS })),
+                    ]);
+            });
+        },
+    });
+}

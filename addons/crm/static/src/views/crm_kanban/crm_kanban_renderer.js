@@ -14,4 +14,15 @@ export class CrmKanbanRenderer extends RottingKanbanRenderer {
         ...RottingKanbanRenderer.components,
         KanbanHeader: CrmKanbanHeader,
     };
+
+    get canResequenceRecords() {
+        // Offline, the kanban groups' DOM nodes are replaced mid-drag, which
+        // orphans the sortable's listeners and turns the drag into a silent
+        // no-op: prevent it from starting instead. Stages remain editable
+        // from the statusbar in the form view.
+        if (this.env.services.offline?.offline) {
+            return false;
+        }
+        return super.canResequenceRecords;
+    }
 }

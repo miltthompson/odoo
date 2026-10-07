@@ -196,7 +196,7 @@ test("offline: statusbar stage buttons are tagged available on crm.lead", async 
     ).toHaveCount(3);
 });
 
-test("offline: kanban stage drag queues the save without rainbowman", async () => {
+test("offline: kanban records are not draggable while offline", async () => {
     const setOffline = mockOffline();
     stubStoreFetch();
     onRpc("crm.lead", "get_rainbowman_message", () => {
@@ -210,12 +210,11 @@ test("offline: kanban stage drag queues the save without rainbowman", async () =
     });
     await setOffline(true);
 
-    await contains(".o_kanban_group:eq(0) .o_kanban_record").dragAndDrop(".o_kanban_group:eq(1)");
-
-    const saves = scheduledValues().filter((v) => v.method === "web_save");
-    expect(saves).toHaveLength(1);
-    expect(saves[0].args[0]).toEqual([1]);
-    expect(saves[0].args[1].stage_id).toBe(2);
+    // the drag is disabled while offline: the group DOM is recreated mid-drag
+    // which orphans the sortable listeners and makes it a silent no-op; stage
+    // changes still go through the form statusbar
+    expect(".o_kanban_record.o_draggable").toHaveCount(0);
+    expect(scheduledValues()).toHaveLength(0);
     expect.verifySteps([]);
 });
 
