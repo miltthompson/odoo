@@ -156,13 +156,17 @@ test("initial and paginated search results cannot overwrite saved history", asyn
         historyResponse(42, [7]),
         user.context
     );
-    // A limit alone cannot establish continuity when results are filtered.
-    await cache.capture(
-        [historyRequest(42, { before: 9, search_filter: "notes" })],
-        historyResponse(42, [7]),
-        user.context
-    );
     expect((await cache.read(MODEL, 42)).messages).toEqual(expected);
+
+    // Exercise each search selector independently with an otherwise cacheable page size.
+    for (const search of [{ search_filter: "notes" }, { search_term: "Note 7" }]) {
+        await cache.capture(
+            [historyRequest(42, { before: 9, ...search })],
+            historyResponse(42, [7]),
+            user.context
+        );
+        expect((await cache.read(MODEL, 42)).messages).toEqual(expected);
+    }
 });
 
 test("an older page can extend the saved history using a deleted message as its cursor", async () => {
