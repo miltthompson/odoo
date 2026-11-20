@@ -128,19 +128,17 @@ const isBundleDescriptor = (url) =>
     url.searchParams.has("registry_hash") &&
     !usesDebugAssets(url);
 
-const hasBundleFiles = async (cache, request, descriptor) => {
-    const requestURL = new URL(request.url || request, self.location.origin);
-    const assetType = requestURL.searchParams.get("offline_asset_type");
+const getBundleAssetType = (url) => {
+    const type = url.searchParams.get("offline_asset_type");
+    return type === "css" || type === "js" ? type : null;
+};
+
+const hasBundleFiles = async (cache, descriptor, assetType) => {
     const files = descriptor
         .filter(({ src }) => src)
         .map(({ src }) => new URL(src, self.location.origin))
         .filter(isBundleFile)
-        .filter((url) => {
-            if (assetType === "css" || assetType === "js") {
-                return url.pathname.endsWith(`.min.${assetType}`);
-            }
-            return true;
-        });
+        .filter((url) => !assetType || url.pathname.endsWith(`.min.${assetType}`));
     return (await Promise.all(files.map((file) => cache.match(file.href)))).every(Boolean);
 };
 
@@ -158,7 +156,8 @@ const saveBundleDescriptor = async (cache, request, response) => {
         }
         // Keep the last complete bundle before recording a replacement. Check at
         // descriptor reads/writes, not at every asset load or in worker memory.
-        if (await hasBundleFiles(cache, request, previousDescriptor)) {
+        const assetType = getBundleAssetType(new URL(request.url || request, self.location.origin));
+        if (await hasBundleFiles(cache, previousDescriptor, assetType)) {
             await cache.put(request, Response.json(previousDescriptor));
         }
     }
@@ -187,16 +186,26 @@ const readCachedBundle = async (request, descriptor) => {
         return cache.match(request);
     }
     const latestCache = await caches.open(bundleDescriptorCacheName);
-    // The writer saves the fallback before publishing a replacement. Read the
-    // latest first so a concurrent publish cannot hide the usable fallback.
-    const latest = await latestCache.match(request);
-    const cached = await cache.match(request);
-    // Prefer the latest descriptor only when all requested files are cached,
-    // or when there is no earlier usable descriptor for this request.
-    if (latest && (!cached || (await hasBundleFiles(cache, request, await latest.clone().json())))) {
-        return latest;
+    const url = new URL(request.url);
+    const assetType = getBundleAssetType(url);
+    async function readDescriptor(key) {
+        // The writer saves the fallback before publishing a replacement. Read
+        // the latest first so a concurrent publish cannot hide the fallback.
+        const latest = await latestCache.match(key);
+        if (latest && (await hasBundleFiles(cache, await latest.clone().json(), assetType))) {
+            return { usable: latest };
+        }
+        return { usable: await cache.match(key), latest };
     }
-    return cached;
+    const { usable, latest } = await readDescriptor(request);
+    if (usable || !assetType) {
+        return usable || latest;
+    }
+    // A subset may be requested offline for the first time even though the
+    // full bundle already has the needed files.
+    url.searchParams.delete("offline_asset_type");
+    const full = await readDescriptor(url.href);
+    return full.usable || latest || full.latest;
 };
 
 const fetchBundle = async (event, descriptor) => {
