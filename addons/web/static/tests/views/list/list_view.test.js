@@ -21136,6 +21136,9 @@ test("offline text search filters the saved page without a new read", async () =
     expect.verifySteps(["read"]);
     await setOffline(true);
     expect(".o_offline_freshness").toHaveText(/Offline: saved on this device/);
+    if (isSmall()) {
+        await contains('button[aria-label="Toggle offline search bar"]').click();
+    }
     await contains(".o_offline_record_search").edit("BLIP", { confirm: false });
     expect(queryAllTexts(".o_list_char")).toEqual(["blip", "blip"]);
     await contains(".o_offline_record_search").edit("", { confirm: false });

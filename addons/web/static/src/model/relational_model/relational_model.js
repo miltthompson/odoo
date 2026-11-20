@@ -260,8 +260,12 @@ export class RelationalModel extends Model {
         const cache = this._getCacheParams(config, promise);
         let freshness = null;
         if (cache && (config.isMonoRecord ? config.resId : !config.resIds)) {
+            // When opening a saved form, or paging to a saved record, keep the existing
+            // cached-first behavior. Reads that require the network can fall back if it is slow.
+            if (this.offlinePlugin.isOffline() || cache.noCache || !config.isMonoRecord) {
+                cache.staleAfter = this.offlinePlugin.isOffline() ? 0 : 600;
+            }
             Object.assign(cache, {
-                staleAfter: this.offlinePlugin.isOffline() ? 0 : 600,
                 onFreshness: (value) => {
                     freshness = value;
                     if (this.config.loadId === config.loadId) {
