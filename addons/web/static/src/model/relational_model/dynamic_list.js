@@ -482,9 +482,19 @@ export class DynamicList extends DataPoint {
             return false;
         }
         const resIds = records.map((record) => record.resId);
+        const queueOffline = async () => {
+            let saved = false;
+            try {
+                saved = await this._saveRecordsOffline(records);
+                return saved;
+            } finally {
+                if (!saved) {
+                    undoFns.forEach((undo) => undo());
+                }
+            }
+        };
         if (resIds.some(isOfflineRecordId)) {
-            const saved = await Promise.all(records.map((record) => record._offlineSave()));
-            return saved.every(Boolean);
+            return queueOffline();
         }
         const [vals] = valsList;
         let values;
@@ -497,9 +507,7 @@ export class DynamicList extends DataPoint {
                 : await this.model.orm.webSaveMulti(this.resModel, resIds, valsList, kwargs);
         } catch (e) {
             if (e instanceof ConnectionLostError) {
-                // keep the changes and replay them when the connection is back
-                const saved = await Promise.all(records.map((record) => record._offlineSave()));
-                return saved.every(Boolean);
+                return queueOffline();
             }
             undoFns.forEach((undo) => undo());
             throw e;
@@ -513,6 +521,19 @@ export class DynamicList extends DataPoint {
             record._setData(valuesById[record.resId]);
         }
         this.model.hooks.onSavedMulti(records);
+        return true;
+    }
+
+    async _saveRecordsOffline(records) {
+        const saves = await Promise.all(records.map((record) => record._prepareOfflineSave()));
+        if (saves.some((save) => !save)) {
+            return false;
+        }
+        const keys = await this.model.offlinePlugin.scheduleORMBatch(saves.map(({ call }) => call));
+        if (!keys) {
+            return false;
+        }
+        saves.forEach(({ onSaved }, index) => onSaved(keys[index]));
         return true;
     }
 

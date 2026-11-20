@@ -842,8 +842,8 @@ export class Record extends DataPoint {
      * @param {RecordType<string, unknown>} [changes]
      * @param {FieldSpecifications} [params]
      */
-    _getChanges(changes = this._changes, { withReadonly } = {}) {
-        if (!this.resId) {
+    _getChanges(changes = this._changes, { withReadonly, isNew = this.isNew } = {}) {
+        if (isNew) {
             // Apply the initial changes when the record is new
             changes = { ...this._values, ...changes };
         }
@@ -867,7 +867,7 @@ export class Record extends DataPoint {
             }
             if (field.type === "one2many" || field.type === "many2many") {
                 const commands = value._getCommands({ withReadonly });
-                if (!this.isNew && !commands.length && !withReadonly) {
+                if (!isNew && !commands.length && !withReadonly) {
                     continue;
                 }
                 result[fieldName] = commands;
@@ -1434,61 +1434,78 @@ export class Record extends DataPoint {
         if (!reference) {
             return false;
         }
-        const key = window.crypto.randomUUID();
-        this.model.offlinePlugin.scheduleORM(this.resModel, method, [[reference.value]], { context: this.context }, {
-            key,
-            refs: reference.key ? [reference.key] : [],
-            target: { model: this.resModel, ids: [this.resId] },
-            extras: {
-                ...getScheduleORMExtras(this.model, [this]),
-                overlayBefore: this._offlineOverlayValues(this._values),
+        const keys = await this.model.offlinePlugin.scheduleORMBatch([{
+            model: this.resModel,
+            method,
+            args: [[reference.value]],
+            kwargs: { context: this.context },
+            options: {
+                refs: reference.key ? [reference.key] : [],
+                target: { model: this.resModel, ids: [this.resId] },
+                extras: {
+                    ...getScheduleORMExtras(this.model, [this]),
+                    overlayBefore: this._offlineOverlayValues(this._values),
+                },
             },
-        });
-        return this.model.offlinePlugin.waitForPendingWrite(key);
+        }]);
+        return Boolean(keys);
     }
 
     async _offlineSave() {
-        const creation = !this.resId;
+        const save = await this._prepareOfflineSave();
+        if (!save) {
+            return false;
+        }
+        const { call, onSaved } = save;
+        const keys = await this.model.offlinePlugin.scheduleORMBatch([call]);
+        if (!keys) {
+            return false;
+        }
+        onSaved(keys[0]);
+        return true;
+    }
+
+    async _prepareOfflineSave() {
+        const creation = this.isNew;
         const key = window.crypto.randomUUID();
         const createdId = creation ? offlineRecordId(key) : undefined;
         const reference = await this._offlineReference();
         if (!reference) {
-            return false;
+            return;
         }
         const changes = this._getChanges();
-        delete changes.id;
-        this._offlineId = this.model.offlinePlugin.scheduleORM(
-            this.resModel,
-            "web_save",
-            [creation ? [] : [reference.value], changes],
-            { context: this.context, specification: {} },
-            {
-                id: this._offlineId,
-                key,
-                createdId,
-                refs: reference.key ? [reference.key] : [],
-                target: { model: this.resModel, ids: [createdId || this.resId] },
-                extras: {
-                    ...getScheduleORMExtras(this.model, [this]),
-                    changes: this._formatOfflineValues(this._changes),
-                    originalValues: this._formatOfflineValues(
-                        pick(this._values, ...Object.keys(this._changes)), { changes: false }
-                    ),
-                    overlayValues: this._offlineOverlayValues(creation ? this.data : this._changes),
-                    overlayBefore: creation ? undefined : this._offlineOverlayValues(this._values),
-                    timeStamp: Date.now(),
+        return {
+            call: {
+                model: this.resModel,
+                method: "web_save",
+                args: [creation ? [] : [reference.value], changes],
+                kwargs: { context: this.context, specification: {} },
+                options: {
+                    id: this._offlineId,
+                    key,
+                    createdId,
+                    refs: reference.key ? [reference.key] : [],
+                    target: { model: this.resModel, ids: [createdId || this.resId] },
+                    extras: {
+                        ...getScheduleORMExtras(this.model, [this]),
+                        changes: this._formatOfflineValues(this._changes),
+                        originalValues: this._formatOfflineValues(
+                            pick(this._values, ...Object.keys(this._changes)), { changes: false }
+                        ),
+                        overlayValues: this._offlineOverlayValues(creation ? this.data : this._changes),
+                        overlayBefore: creation ? undefined : this._offlineOverlayValues(this._values),
+                    },
                 },
-            }
-        );
-        if (!(await this.model.offlinePlugin.waitForPendingWrite(key))) {
-            return false;
-        }
-        if (createdId) {
-            this.config.resId = createdId;
-            this.config.resIds = [createdId];
-        }
-        this._commitSave();
-        return true;
+            },
+            onSaved: (id) => {
+                this._offlineId = id;
+                if (createdId) {
+                    this.config.resId = createdId;
+                    this.config.resIds = [createdId];
+                }
+                this._commitSave();
+            },
+        };
     }
     /**
      * For owl reactivity, it's better to only update the keys inside the evalContext

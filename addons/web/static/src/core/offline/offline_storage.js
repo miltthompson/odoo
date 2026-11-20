@@ -97,20 +97,34 @@ export class OfflineQueueStore {
     }
 
     async add(entry) {
-        const seq = ((await this.db.read(QUEUE_META, "seq")) || 0) + 1;
-        // A crash between writing the counter and entry can leave a gap, not a reused sequence.
-        await this.db.write(QUEUE_META, "seq", seq);
-        const saved = { ...entry, seq };
-        await this.write(saved);
+        const [saved] = await this.addMany([entry]);
         return saved;
     }
 
-    async write(entry) {
+    async addMany(entries) {
+        let seq = (await this.db.read(QUEUE_META, "seq")) || 0;
+        const saved = entries.map((entry) => ({ ...entry, seq: ++seq }));
+        // An interrupted write can leave a gap, but cannot reuse a sequence number.
+        await this.db.write(QUEUE_META, "seq", seq);
+        // All entries commit in a single IndexedDB transaction.
+        await this._writeEntries(saved);
+        return saved;
+    }
+
+    write(entry) {
+        return this._writeEntries([entry]);
+    }
+
+    async _writeEntries(entries) {
         await this.keyReady;
         const { id, key } = await this.keys.current();
-        // Store the UUID rather than the legacy hash, which is derived from plaintext.
-        const payload = await new Crypto(key).encrypt(entry);
-        await this.db.write(ENTRIES, entry.key, { keyId: id, payload });
+        const crypto = new Crypto(key);
+        // Store the UUID rather than the compatibility key derived from plaintext.
+        const values = await Promise.all(entries.map(async (entry) => ({
+            key: entry.key,
+            value: { keyId: id, payload: await crypto.encrypt(entry) },
+        })));
+        await this.db.write(ENTRIES, values);
     }
 
     async recordResolution(model, localId, key, id) {
