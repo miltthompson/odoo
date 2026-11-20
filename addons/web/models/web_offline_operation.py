@@ -24,8 +24,11 @@ def _created_id(method, args, kwargs, response):
     if method == 'web_save' and args and not args[0] and len(args) < 4 and not kwargs.get('next_id'):
         if isinstance(response, list) and len(response) == 1 and isinstance(response[0], dict):
             return response[0].get('id')
-    if method == 'create' and type(response) is int:
-        return response
+    if method == 'create':
+        if isinstance(response, list) and len(response) == 1:
+            response = response[0]
+        if type(response) is int and response > 0:
+            return response
     return None
 
 
@@ -36,7 +39,8 @@ class WebOfflineOperation(models.Model):
 
     user_id = fields.Many2one('res.users', required=True, ondelete='cascade')
     key = fields.Char(required=True)
-    result = fields.Json()
+    # The payload may contain values administrators cannot read on the source model.
+    result = fields.Json(groups=fields.NO_ACCESS)
 
     _user_key_unique = models.Constraint('UNIQUE(user_id, key)')
     _create_date_index = models.Index('(create_date)')

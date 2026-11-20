@@ -1,9 +1,16 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, RLock
+from unittest.mock import patch
 from uuid import uuid4
 
-from odoo import fields
-from odoo.tests import HttpCase, new_test_user
+from odoo import SUPERUSER_ID, api, fields
+from odoo.exceptions import AccessError
+from odoo.http.retrying import retrying
+from odoo.modules.registry import Registry
+from odoo.tests import HttpCase, new_test_user, tagged
+from odoo.tests.common import BaseCase, get_db_name
 from odoo.tools import SQL, mute_logger
 
 
@@ -41,7 +48,7 @@ class TestOfflineSync(HttpCase):
     def test_refs_only_resolve_creates_by_the_current_owner(self):
         self.authenticate(self.alice.login, self.alice.login)
         create_key = str(uuid4())
-        partner_id = self._sync(create_key, 'create', [{'name': 'Offline contact'}])['result']
+        [partner_id] = self._sync(create_key, 'create', [[{'name': 'Offline contact'}]])['result']
         update_key = str(uuid4())
         args = [[f'offline:{create_key}'], {'name': 'Updated contact'}]
         self.authenticate(self.bob.login, self.bob.login)
@@ -58,6 +65,15 @@ class TestOfflineSync(HttpCase):
         self.assertEqual(self._sync(key, 'create', [{'name': 'Wrong database'}],
                                    owner=self.bob, db='another-db')['error']['code'], 100)
         self.assertFalse(self.env['web.offline.operation'].search([('key', '=', key)]))
+
+    def test_administrator_can_read_metadata_but_not_payload(self):
+        operation = self.env['web.offline.operation'].create({
+            'user_id': self.alice.id, 'key': str(uuid4()), 'result': {'response': 'Private'},
+        })
+        as_admin = operation.with_user(self.env.ref('base.user_admin'))
+        self.assertEqual(as_admin.read(['key'])[0]['key'], operation.key)
+        with self.assertRaises(AccessError):
+            as_admin.read(['result'])
 
     def test_vacuum_retains_recent_operations(self):
         Operation = self.env['web.offline.operation']
@@ -81,3 +97,48 @@ class TestOfflineSync(HttpCase):
         error = self._sync(key, 'search_read', [[]], model='web.offline.operation')['error']
         self.assertEqual(error['data']['name'], 'odoo.exceptions.AccessError')
         self.assertFalse(self.env['web.offline.operation'].search([('key', '=', key)]))
+
+
+@tagged('-standard', 'database_breaking')  # Requires independent committing database cursors.
+class TestOfflineSyncConcurrency(BaseCase):
+
+    @mute_logger('odoo.sql_db')
+    def test_concurrent_replay(self):
+        registry = Registry(get_db_name())
+        key = str(uuid4())
+        start = Barrier(2, timeout=10)
+        domain = [('key', '=', key)]
+        partner_domain = [('name', '=', key)]
+
+        def cleanup():
+            with registry.cursor() as cr:
+                env = api.Environment(cr, SUPERUSER_ID, {})
+                env['web.offline.operation'].search(domain).unlink()
+                env['res.partner'].search(partner_domain).unlink()
+
+        self.addCleanup(cleanup)
+
+        def send(env):
+            start.wait()
+            return retrying(
+                lambda: env['web.offline.operation']._apply(key, 'res.partner', 'create', [{'name': key}], {}, []),
+                env, close_on_commit=False,
+            )
+
+        with registry.cursor() as cr1, registry.cursor() as cr2:
+            envs = [api.Environment(cr, SUPERUSER_ID, {}) for cr in (cr1, cr2)]
+            # Take both repeatable-read snapshots before allowing either insert.
+            for env in envs:
+                self.assertFalse(env['web.offline.operation'].search(domain))
+
+            # The test runner holds the normal registry lock. Use a separate
+            # lock for these workers without replacing their real DB cursors.
+            with patch.object(Registry, '_lock', RLock()), ThreadPoolExecutor(max_workers=2) as executor:
+                first, second = [executor.submit(send, env) for env in envs]
+                partner_id = first.result(timeout=20)
+                self.assertEqual(second.result(timeout=20), partner_id)
+
+        with registry.cursor() as cr:
+            env = api.Environment(cr, SUPERUSER_ID, {})
+            self.assertEqual(env['res.partner'].search(partner_domain).ids, [partner_id])
+            self.assertEqual(env['web.offline.operation'].search_count(domain), 1)
