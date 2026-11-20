@@ -7,6 +7,7 @@ import { DebugModePlugin } from "@web/core/debug_mode_plugin";
 import { localization } from "@web/core/l10n/localization";
 import { MainComponentsContainer } from "@web/core/main_components_container";
 import { rpcBus } from "@web/core/network/rpc";
+import { registerServiceWorker, SCOPED_APP_SCOPE, WEBCLIENT_SCOPE } from "@web/core/pwa/service_worker";
 import { registry } from "@web/core/registry";
 import { useBus, useService } from "@web/core/utils/hooks";
 import { ActionContainer } from "@web/webclient/actions/action_container";
@@ -171,31 +172,51 @@ export class WebClient extends Component {
     }
 
     registerServiceWorker() {
-        if (navigator.serviceWorker) {
-            navigator.serviceWorker
-                .register("/web/service-worker.js", { scope: "/odoo" })
-                .then((registration) => {
-                    if (registration.active && registration.active.state === "activated") {
+        const { serviceWorker } = browser.navigator;
+        if (!serviceWorker) {
+            return;
+        }
+        const url = location.href;
+        const scope = location.pathname.startsWith(`${SCOPED_APP_SCOPE}/`)
+            ? SCOPED_APP_SCOPE
+            : WEBCLIENT_SCOPE;
+        const needsPriming = !serviceWorker.controller;
+        registerServiceWorker(scope)
+            .then((registration) => {
+                const onActivated = (worker) => {
+                    // Push notifications keep using the main web client's registration.
+                    if (scope === WEBCLIENT_SCOPE) {
                         this.serviceWorkerActivationResolvers.resolve();
-                    } else {
-                        const sw =
-                            registration.installing || registration.waiting || registration.active;
-                        sw.addEventListener("statechange", (e) => {
-                            if (e.target.state === "activated") {
-                                this.serviceWorkerActivationResolvers.resolve();
-                            }
-                        });
                     }
-                    navigator.serviceWorker.ready.then(() => {
-                        if (!navigator.serviceWorker.controller) {
-                            // https://stackoverflow.com/questions/51597231/register-service-worker-after-hard-refresh
+                    if (needsPriming) {
+                        const bundles = Array.from(
+                            document.head.querySelectorAll("script[src], link[rel=stylesheet][href]"),
+                            (node) => node.src || node.href
+                        );
+                        worker.postMessage({ type: "cache_webclient", url, bundles });
+                    }
+                };
+                if (registration.active?.state === "activated") {
+                    onActivated(registration.active);
+                } else {
+                    const worker = registration.installing || registration.waiting || registration.active;
+                    worker?.addEventListener("statechange", () => {
+                        if (worker.state === "activated") {
+                            onActivated(worker);
+                        }
+                    });
+                }
+                if (scope === WEBCLIENT_SCOPE) {
+                    serviceWorker.ready.then(() => {
+                        if (!serviceWorker.controller) {
+                            // A hard refresh bypasses the controller and the RPC cache must be reset.
                             rpcBus.trigger("CLEAR-CACHES");
                         }
                     });
-                })
-                .catch((error) => {
-                    console.error("Service worker registration failed, error:", error);
-                });
-        }
+                }
+            })
+            .catch((error) => {
+                console.error("Service worker registration failed, error:", error);
+            });
     }
 }

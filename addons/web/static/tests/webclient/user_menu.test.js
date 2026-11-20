@@ -22,6 +22,7 @@ import { UserMenu } from "@web/webclient/user_menu/user_menu";
 import { preferencesItem, shareUrlMenuItem } from "@web/webclient/user_menu/user_menu_items";
 
 const userMenuRegistry = registry.category("user_menuitems");
+const installPWAItem = userMenuRegistry.get("install_pwa");
 
 describe.current.tags("desktop");
 
@@ -188,4 +189,26 @@ test("Share URL item is not present in the user menu when not running as PWA", a
     await mountWithCleanup(UserMenu);
     await contains(".o_user_menu").click();
     expect(".o-dropdown--menu .dropdown-item").not.toHaveCount();
+});
+
+test("Install CRM opens its scoped app installer", async () => {
+    mockService("pwa", () => ({ isScopedApp: false }));
+    mockService("menu", () => ({
+        getCurrentApp: () => ({ actionPath: "crm", name: "CRM", webIcon: "crm,icon.png" }),
+    }));
+    patchWithCleanup(window, {
+        open(url) {
+            const installer = new URL(url, window.location.origin);
+            expect(installer.pathname).toBe("/scoped_app");
+            expect(installer.searchParams.get("app_id")).toBe("crm");
+            expect(installer.searchParams.get("path")).toBe("scoped_app/crm");
+            expect.step("open installer");
+        },
+    });
+    userMenuRegistry.add("install_pwa", installPWAItem);
+    await mountWithCleanup(UserMenu);
+    await contains(".o_user_menu").click();
+    expect('[data-menu="install_pwa"]').toHaveText("Install CRM");
+    await contains('[data-menu="install_pwa"]').click();
+    expect.verifySteps(["open installer"]);
 });

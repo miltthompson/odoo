@@ -4,6 +4,7 @@ import { Component, onMounted, proxy } from "@odoo/owl";
 import { isDisplayStandalone } from "@web/core/browser/feature_detection";
 import { useService } from "@web/core/utils/hooks";
 import { Dropdown } from "@web/core/dropdown/dropdown";
+import { registerServiceWorker, SCOPED_APP_SCOPE } from "@web/core/pwa/service_worker";
 
 export class InstallScopedApp extends Component {
     static template = "web.InstallScopedApp";
@@ -16,6 +17,11 @@ export class InstallScopedApp extends Component {
         // immediately, others will wait that the user has interacted for some time with the website.
         this.isInstallationPossible = browser.BeforeInstallPromptEvent !== undefined;
         onMounted(async () => {
+            if (location.pathname === SCOPED_APP_SCOPE && browser.navigator.serviceWorker) {
+                registerServiceWorker(SCOPED_APP_SCOPE).catch((error) => {
+                    console.error("Service worker registration failed, error:", error);
+                });
+            }
             this.state.manifest = await this.pwa.getManifest();
             this.state.showInstallUI = true;
         });
