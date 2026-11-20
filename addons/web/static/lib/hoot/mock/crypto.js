@@ -6,6 +6,7 @@
 
 const {
     Math: { random: $random, floor: $floor },
+    crypto: $crypto,
     TextEncoder,
 } = globalThis;
 
@@ -64,6 +65,7 @@ export const mockCrypto = {
     getRandomValues,
     randomUUID,
     subtle: {
+        digest: $crypto?.subtle?.digest.bind($crypto.subtle),
         decrypt,
         encrypt,
         importKey,

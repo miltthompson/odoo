@@ -391,9 +391,21 @@ export class MockServiceWorkerRegistration {
 
 // Naive lock that doesn't lock anything
 export class MockLockManager {
+    _locks = new Map();
+
     async request(name, ...args) {
-        const callback = args.length > 1 ? args[1] : args[0];
-        callback();
+        const callback = args.at(-1);
+        const previous = this._locks.get(name) || Promise.resolve();
+        const current = previous.then(() => callback({ name, mode: "exclusive" }));
+        const settled = current.catch(() => {});
+        this._locks.set(name, settled);
+        try {
+            return await current;
+        } finally {
+            if (this._locks.get(name) === settled) {
+                this._locks.delete(name);
+            }
+        }
     }
 
     async query() {

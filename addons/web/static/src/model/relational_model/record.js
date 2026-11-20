@@ -396,7 +396,11 @@ export class Record extends DataPoint {
                 this._parseOfflineValues(scheduledORM.value.extras.changes)
             );
             this._offlineTimeStamp = scheduledORM.value.extras.timeStamp;
-            return this.update(this._offlineChanges);
+            return this.model.mutex.exec(async () => {
+                await this._update(this._offlineChanges);
+                // Reopening a queued change loads saved data; it is not another edit.
+                this._commitSave();
+            });
         }
     }
 
@@ -829,8 +833,8 @@ export class Record extends DataPoint {
      * @param {RecordType<string, unknown>} [changes]
      * @param {FieldSpecifications} [params]
      */
-    _getChanges(changes = this._changes, { withReadonly } = {}) {
-        if (!this.resId) {
+    _getChanges(changes = this._changes, { withReadonly, isNew = this.isNew } = {}) {
+        if (isNew) {
             // Apply the initial changes when the record is new
             changes = { ...this._values, ...changes };
         }
@@ -854,7 +858,7 @@ export class Record extends DataPoint {
             }
             if (field.type === "one2many" || field.type === "many2many") {
                 const commands = value._getCommands({ withReadonly });
-                if (!this.isNew && !commands.length && !withReadonly) {
+                if (!isNew && !commands.length && !withReadonly) {
                     continue;
                 }
                 result[fieldName] = commands;
@@ -1239,7 +1243,7 @@ export class Record extends DataPoint {
         }
         const changes = this._getChanges();
         delete changes.id; // id never changes, and should not be written
-        if (!creation && !Object.keys(changes).length) {
+        if ((!creation || this._offlineId) && !Object.keys(changes).length) {
             if (nextId) {
                 return this.model.load({ resId: nextId });
             }
@@ -1388,33 +1392,46 @@ export class Record extends DataPoint {
         this.dirty = false;
     }
 
-    _offlineSave() {
-        this._offlineChanges = markRaw({ ...(this._offlineChanges || {}), ...this._changes });
-        const offlineChanges = this._getChanges(this._offlineChanges);
-        delete offlineChanges.id; // id never changes, and should not be written
-
-        this._offlineTimeStamp = this._offlineTimeStamp || Date.now();
-        this._offlineId = this.model.offlinePlugin.scheduleORM(
-            this.resModel,
-            "web_save",
-            [this.resId ? [this.resId] : [], offlineChanges],
-            { context: this.context, specification: {} }, //Here for the kwargs we don't need the specification or the next_id
-            {
-                id: this._offlineId,
-                extras: {
-                    ...getScheduleORMExtras(this.model, [this]),
-                    changes: this._formatOfflineValues(this._offlineChanges),
-                    originalValues: this._formatOfflineValues(
-                        pick(this._values, ...Object.keys(this._offlineChanges)),
-                        { changes: false }
-                    ),
-                    timeStamp: this._offlineTimeStamp,
-                },
-            }
-        );
-
-        this._commitSave();
+    async _offlineSave() {
+        const { call, onSaved } = this._prepareOfflineSave();
+        const keys = await this.model.offlinePlugin.scheduleORMBatch([call]);
+        if (!keys) {
+            return false;
+        }
+        onSaved(keys[0]);
         return true;
+    }
+
+    _prepareOfflineSave() {
+        const offlineChanges = markRaw({ ...(this._offlineChanges || {}), ...this._changes });
+        const changes = this._getChanges(this._changes, { isNew: this.isNew && !this._offlineId });
+        const timeStamp = this._offlineTimeStamp || Date.now();
+        return {
+            call: {
+                model: this.resModel,
+                method: "web_save",
+                args: [this.resId ? [this.resId] : [], changes],
+                kwargs: { context: this.context, specification: {} },
+                options: {
+                    id: this._offlineId,
+                    extras: {
+                        ...getScheduleORMExtras(this.model, [this]),
+                        changes: this._formatOfflineValues(offlineChanges),
+                        originalValues: this._formatOfflineValues(
+                            pick(this._values, ...Object.keys(offlineChanges)),
+                            { changes: false }
+                        ),
+                        timeStamp,
+                    },
+                },
+            },
+            onSaved: (id) => {
+                this._offlineId = id;
+                this._offlineTimeStamp = timeStamp;
+                this._offlineChanges = offlineChanges;
+                this._commitSave();
+            },
+        };
     }
     /**
      * For owl reactivity, it's better to only update the keys inside the evalContext

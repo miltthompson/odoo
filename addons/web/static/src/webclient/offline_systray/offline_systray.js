@@ -32,30 +32,31 @@ class OfflineSystray extends Component {
     groupEntries = computed(() => {
         const items = [];
         for (const { key, value } of Object.values(this.offlinePlugin._ormToSync())) {
-            const timeStamp = formatDateTime(DateTime.fromMillis(value.extras.timeStamp));
+            const pending = this.offlinePlugin.getPendingEntry(key);
+            const extras = value.extras || {};
+            const timeStamp = formatDateTime(DateTime.fromMillis(extras.timeStamp ?? pending.acted_at));
             const item = {
                 id: key,
-                timeStamp: value.extras.timeStamp,
-                actionName: value.extras.actionName,
-                displayName: value.extras.displayName,
+                timeStamp: extras.timeStamp ?? pending.acted_at,
+                actionName: extras.actionName,
+                displayName: extras.displayName || pending.label,
                 clickable: this.isClickable(value),
-                error: value.extras.error,
-                tooltip: {
-                    timeStamp,
-                    records: value.extras.displayNames || [],
-                },
+                retryKey: pending.state === "needs_attention" && !extras.error && pending.key,
+                error: extras.error || pending.error,
+                status: { label: _t("Changed"), color: 3 },
+                tooltip: { timeStamp, records: extras.displayNames || [] },
             };
             if (value.method === "web_save") {
                 item.status = value.args[0].length ? STATUS.EDITED : STATUS.CREATED;
-                item.tooltip.changes = Object.entries(value.extras.changes).map(([k, v]) => [
+                item.tooltip.changes = Object.entries(extras.changes || {}).map(([k, v]) => [
                     k,
                     v?.display_name ?? v,
                 ]);
                 if (value.args[0].length) {
                     item.tooltip.changes = item.tooltip.changes.map((c) => [
                         c[0],
-                        value.extras.originalValues[c[0]]?.display_name ??
-                            JSON.stringify(value.extras.originalValues[c[0]]),
+                        extras.originalValues?.[c[0]]?.display_name ??
+                            JSON.stringify(extras.originalValues?.[c[0]]),
                         c[1],
                     ]);
                 }
@@ -80,17 +81,17 @@ class OfflineSystray extends Component {
     });
 
     isClickable(value) {
-        const resId = value.args[0].length ? value.args[0][0] : false;
+        const resId = value.args[0]?.[0] || false;
         return (
             value.method === "web_save" &&
-            value.extras.viewType === "form" &&
+            value.extras?.viewType === "form" &&
             (!this.offlinePlugin.isOffline() ||
                 this.offlinePlugin.isAvailableOffline(value.extras.actionId, "form", resId))
         );
     }
 
     inError = computed(() =>
-        Object.values(this.offlinePlugin._ormToSync()).find(({ value }) => value.extras.error)
+        this.offlinePlugin.getPendingEntries().find((entry) => entry.state === "needs_attention")
     );
 
     get labelColor() {
@@ -129,6 +130,9 @@ class OfflineSystray extends Component {
     }
 
     get labelText() {
+        if (this.offlinePlugin.syncPaused()) {
+            return _t("Log in again to send changes");
+        }
         if (this.offlinePlugin.syncingORM()) {
             return _t("Syncing");
         }
@@ -160,9 +164,6 @@ class OfflineSystray extends Component {
             props: { offlineId: id, resId },
             clearBreadcrumbs: true,
         });
-        if (!this.offlinePlugin.isOffline()) {
-            this.offlinePlugin.removeScheduledORM(id);
-        }
     }
 }
 

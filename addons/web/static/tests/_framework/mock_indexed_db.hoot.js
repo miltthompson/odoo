@@ -33,7 +33,9 @@ export function mockIndexedDBFactory(name, { fn }) {
                 }
                 this.name = name;
                 this.mutex = new Mutex();
-                this.mutex.exec(() => this._checkVersion(version));
+                if (version !== undefined) {
+                    this.mutex.exec(() => this._checkVersion(version));
+                }
             }
 
             get objectStoreNames() {
