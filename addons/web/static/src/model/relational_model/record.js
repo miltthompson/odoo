@@ -380,7 +380,10 @@ export class Record extends DataPoint {
     setOfflineChanges(id) {
         let scheduledORM;
         if (id) {
-            scheduledORM = this.model.offlinePlugin._ormToSync()[id];
+            const entry = this.model.offlinePlugin.getPendingEntries().find((item) => item.key === id);
+            scheduledORM = entry
+                ? { key: entry.legacyKey, value: entry }
+                : this.model.offlinePlugin._ormToSync()[id];
         } else {
             scheduledORM = Object.values(this.model.offlinePlugin._ormToSync()).find(
                 (s) =>

@@ -730,6 +730,16 @@ export class OfflinePlugin extends Plugin {
                         continue;
                     }
                     await this._queue.lock(async () => {
+                        if (method === "web_save" && !args[0]?.length) {
+                            const id = result?.already_applied ? result.created_ids[0] : result?.[0]?.id;
+                            if (Number.isSafeInteger(id) && id > 0) {
+                                // Keep the replay reference for ordering, but open the saved record.
+                                const updated = await this._queue.rememberDraftRecord(key, model, id);
+                                for (const edit of updated) {
+                                    this._replaceEntry(edit);
+                                }
+                            }
+                        }
                         await this._queue.remove(key);
                         this._removeEntry(key);
                     });

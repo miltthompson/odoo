@@ -9,8 +9,32 @@ $o-offline-separator-color: invert($popover-bg, 10%) !default;
     }
 }
 
+.o_offline_pending_count {
+    font-size: 0.65rem;
+}
+
 .o_offline_systray_content {
-    width: 300px;
+    width: min(24rem, 100vw);
+
+    .o_offline_pending_item {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        column-gap: map-get($spacers, 1);
+        align-items: start;
+    }
+
+    .o_offline_pending_details {
+        grid-column: 1 / 3;
+        grid-row: 2;
+        overflow-wrap: anywhere;
+    }
+
+    @include media-breakpoint-down(md) {
+        .btn {
+            min-block-size: 44px;
+            min-inline-size: 44px;
+        }
+    }
 
     .o_badge {
         vertical-align: middle;
