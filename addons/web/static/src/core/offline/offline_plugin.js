@@ -96,6 +96,9 @@ export class OfflinePlugin extends Plugin {
     _onOfflineActivation = (ev) => this._guardOfflineActivation(ev);
 
     setup() {
+        // Guard clicks before views register capture handlers that may save inline edits.
+        useListener(window, "click", this._onOfflineActivation, { capture: true });
+
         // Use "offline" and "online" events for instant detection of connection lost/restored.
         useListener(browser, "offline", () => {
             if (!this.isOffline()) {
@@ -162,9 +165,7 @@ export class OfflinePlugin extends Plugin {
             for (const type of GUARDED_EVENTS) {
                 window.addEventListener(type, this._onOfflineActivation, true);
             }
-            for (const type of OFFLINE_POINTER_EVENTS) {
-                document.addEventListener(type, this._onOfflineActivation, true);
-            }
+            document.addEventListener("pointerdown", this._onOfflineActivation, true);
             this._offlineUI();
             // Create an observer instance linked to the callback function to keep disabling
             // elements that would appear in the DOM while being offline.
@@ -395,9 +396,7 @@ export class OfflinePlugin extends Plugin {
         for (const type of GUARDED_EVENTS) {
             window.removeEventListener(type, this._onOfflineActivation, true);
         }
-        for (const type of OFFLINE_POINTER_EVENTS) {
-            document.removeEventListener(type, this._onOfflineActivation, true);
-        }
+        document.removeEventListener("pointerdown", this._onOfflineActivation, true);
         this._offlineNotice?.close();
         this._offlineNotice = null;
         this._onlineUI();
@@ -584,6 +583,10 @@ export class OfflinePlugin extends Plugin {
             el.setAttribute("aria-disabled", state.ariaDisabled);
         }
         for (const [name, value] of state.tooltip) {
+            const offlineValue = name === "data-tooltip-template" ? null : state.reason;
+            if (el.getAttribute(name) !== offlineValue) {
+                continue; // The component has since supplied its own tooltip.
+            }
             if (value === null) {
                 el.removeAttribute(name);
             } else {

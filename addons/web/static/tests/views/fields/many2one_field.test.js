@@ -470,6 +470,7 @@ test("[Offline] many2one autopopulated", async () => {
         resModel: "partner",
         type: "form",
         arch: `<form> <field name="trululu"/> </form>`,
+        context: { default_type: "opportunity", search_default_team_id: 1 },
         resIds: [1, 2, 4],
         resId: 1,
     });
