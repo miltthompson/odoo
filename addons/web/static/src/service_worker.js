@@ -188,24 +188,28 @@ const readCachedBundle = async (request, descriptor) => {
     const latestCache = await caches.open(bundleDescriptorCacheName);
     const url = new URL(request.url);
     const assetType = getBundleAssetType(url);
+    const hasRequestedFiles = async (entry) =>
+        entry && hasBundleFiles(cache, await entry.clone().json(), assetType);
     async function readDescriptor(key) {
         // The writer saves the fallback before publishing a replacement. Read
         // the latest first so a concurrent publish cannot hide the fallback.
         const latest = await latestCache.match(key);
-        if (latest && (await hasBundleFiles(cache, await latest.clone().json(), assetType))) {
-            return { usable: latest };
+        if (await hasRequestedFiles(latest)) {
+            return latest;
         }
-        return { usable: await cache.match(key), latest };
+        const previous = await cache.match(key);
+        if (await hasRequestedFiles(previous)) {
+            return previous;
+        }
     }
-    const { usable, latest } = await readDescriptor(request);
+    const usable = await readDescriptor(request);
     if (usable || !assetType) {
-        return usable || latest;
+        return usable;
     }
     // A subset may be requested offline for the first time even though the
     // full bundle already has the needed files.
     url.searchParams.delete("offline_asset_type");
-    const full = await readDescriptor(url.href);
-    return full.usable || latest || full.latest;
+    return readDescriptor(url.href);
 };
 
 const fetchBundle = async (event, descriptor) => {
