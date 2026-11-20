@@ -10,6 +10,7 @@ import { post } from "@web/core/network/http_service";
 import { redirect } from "@web/core/utils/urls";
 import { useService } from "@web/core/utils/hooks";
 import { ORM } from "@web/core/orm_plugin";
+import { SCOPED_APP_SCOPE, WEBCLIENT_SCOPE } from "@web/core/pwa/service_worker";
 
 function supportItem() {
     const url = session.support_url;
@@ -86,7 +87,7 @@ function installPWAItem() {
     let callback = () => pwa.show();
     let hide = !pwa.isAvailable || isDisplayStandalone();
     const currentApp = menu.getCurrentApp();
-    if (currentApp && ["barcode", "field-service", "shop-floor"].includes(currentApp.actionPath)) {
+    if (currentApp && ["barcode", "crm", "field-service", "shop-floor"].includes(currentApp.actionPath)) {
         // While the feature could work with all apps, we have decided to only
         // support the installation of the apps contained in this list
         // The list can grow in the future, by simply adding their path
@@ -121,7 +122,20 @@ function logOutItem() {
         id: "logout",
         description: _t("Log out"),
         callback: async () => {
-            browser.navigator.serviceWorker?.controller?.postMessage("user_logout");
+            const { serviceWorker } = browser.navigator;
+            if (serviceWorker) {
+                const workers = new Set([serviceWorker.controller]);
+                const registrations = await serviceWorker.getRegistrations().catch(() => []);
+                const scopes = [WEBCLIENT_SCOPE, SCOPED_APP_SCOPE];
+                for (const registration of registrations) {
+                    if (scopes.includes(new URL(registration.scope).pathname)) {
+                        workers.add(registration.active);
+                    }
+                }
+                for (const worker of workers) {
+                    worker?.postMessage("user_logout");
+                }
+            }
             const url = await post(route, { csrf_token: odoo.csrf_token }, "url");
             redirect(url);
         },

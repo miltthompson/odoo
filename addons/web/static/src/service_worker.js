@@ -1,107 +1,292 @@
 // @odoo-module ignore
 
 /* eslint-disable no-restricted-globals */
-const cacheName = "odoo-sw-cache";
-const homepageURL = "/odoo";
-const offLineURL = `${homepageURL}/offline`;
+const pageCacheName = "odoo-sw-cache";
+const bundleCacheName = "odoo-sw-bundles";
+const bundleDescriptorCacheName = "odoo-sw-bundle-descriptors";
+const scopePath = new URL(self.registration.scope).pathname;
+const offlineURL = "/odoo/offline";
+const sessionPattern = /(odoo\.__session_info__\s*=\s*)({[^\r\n]*})(;)/;
+const csrfPattern = /(\bcsrf_token:\s*)"([^"\r\n]*)"/;
+const sessionPlaceholder = "@@@session_info_secret@@@";
+const csrfPlaceholder = "@@@csrf_token_secret@@@";
 
-let sessionInfo = null;
+// The cache contains only the shell. Bootstrap values live in this worker's RAM.
+let savedPageSession;
+let pageGeneration = 0;
 
 self.addEventListener("install", (event) => {
-    event.waitUntil(
-        Promise.all([
-            // Needed because the sw is register after the initial fetch
-            fetch(homepageURL).then((res) => (res.ok ? storeDataOnCache(homepageURL, res) : null)),
-            // offLine Page
-            caches.open(cacheName).then((cache) => cache.add(offLineURL)),
-        ])
-    );
+    event.waitUntil(caches.open(pageCacheName).then((cache) => cache.add(offlineURL)));
 });
 
-const extractSessionInfo = (htmlContent) => {
-    const match = htmlContent.match(/odoo\.__session_info__\s*=\s*({.*?});/s);
-    return match && match[1] ? match[1] : null;
-};
-
-const getTextFromResponse = async (response) => {
-    const reader = response.clone().body.getReader();
-    const decoder = new TextDecoder();
-    let result = "";
-    async function read() {
-        const { value, done } = await reader.read();
-        if (done) {
-            reader.releaseLock();
-            return;
-        }
-        result += decoder.decode(value, { stream: true });
-        await read();
+self.addEventListener("activate", (event) => {
+    if (scopePath === "/scoped_app") {
+        // Control the install page and first app visit without waiting for a reload.
+        event.waitUntil(self.clients.claim());
     }
-    await read();
-    return result;
+});
+
+const isWebclientURL = (url) =>
+    url.origin === self.location.origin &&
+    url.pathname !== offlineURL &&
+    ((scopePath === "/odoo" && url.pathname === scopePath) ||
+        url.pathname.startsWith(`${scopePath}/`));
+
+const usesDebugAssets = (url) => url.searchParams.get("debug")?.includes("assets");
+
+const pageResponse = (html, response) => {
+    const headers = new Headers(response.headers);
+    headers.delete("Content-Encoding");
+    headers.delete("Content-Length");
+    return new Response(html, { headers });
 };
 
-const storeDataOnCache = async (url, response) => {
-    const htmlBody = await getTextFromResponse(response);
-    // store on ram, the session info
-    sessionInfo = extractSessionInfo(htmlBody);
-    const cache = await caches.open(cacheName);
-    return cache.put(
-        url.endsWith(offLineURL) ? url : homepageURL,
-        new Response(htmlBody.replace(sessionInfo, "@@@session_info_secret@@@"), {
-            headers: response.headers,
-        })
+const savePage = async (response, generation) => {
+    if (!response.ok || response.redirected) {
+        return;
+    }
+    const html = await response.text();
+    const sessionInfo = html.match(sessionPattern)?.[2];
+    const csrfToken = html.match(csrfPattern)?.[2];
+    if (!sessionInfo || csrfToken === undefined) {
+        return;
+    }
+    const shell = html
+        .replace(sessionPattern, `$1${sessionPlaceholder}$3`)
+        .replace(csrfPattern, `$1"${csrfPlaceholder}"`);
+    const cache = await caches.open(pageCacheName);
+    if (generation === pageGeneration) {
+        await cache.put(scopePath, pageResponse(shell, response));
+        if (generation === pageGeneration) {
+            savedPageSession = { sessionInfo, csrfToken };
+        }
+    }
+};
+
+const clearSavedPage = async () => {
+    pageGeneration++;
+    savedPageSession = undefined;
+    const cache = await caches.open(pageCacheName);
+    await cache.delete(scopePath);
+};
+
+const readSavedPage = async (cache) => {
+    const generation = pageGeneration;
+    const response = await cache.match(scopePath);
+    const html = await response?.text();
+    if (!html || !savedPageSession || generation !== pageGeneration) {
+        return;
+    }
+    const { sessionInfo, csrfToken } = savedPageSession;
+    return pageResponse(
+        html.replace(/@@@(?:session_info|csrf_token)_secret@@@/g, (placeholder) =>
+            placeholder === sessionPlaceholder ? sessionInfo : csrfToken
+        ),
+        response
     );
 };
 
-const readDataOnCache = async (url) => {
-    const cache = await caches.open(cacheName);
-    const response = await cache.match(url);
-    if (url === offLineURL) {
-        return response;
-    }
-    // if you come from /odoo to project the url is now /odoo/project, but it doesn't exist in cache so use /odoo instead
-    if (!response) {
-        return readDataOnCache(homepageURL);
-    }
-    const htmlBody = await getTextFromResponse(response);
-    return new Response(htmlBody.replaceAll("@@@session_info_secret@@@", sessionInfo), {
-        headers: response.headers,
-    });
-};
-
-const fetchErrorMessages = [
-    "Failed to fetch", // Chromium
-    "Load failed", // WebKit
-    "NetworkError when attempting to fetch resource.", // Firefox
-];
-
-const navigateOrDisplayOfflinePage = async (request) => {
-    const isDebugAssets = new URL(request.url).searchParams.get("debug")?.includes("assets");
+const navigateOrDisplayOfflinePage = async (event, url) => {
+    const { request } = event;
+    const generation = pageGeneration;
+    const canSave = isWebclientURL(url) && !usesDebugAssets(url);
+    let response;
     try {
-        const response = await fetch(request);
-        if (response.ok && !isDebugAssets) {
-            storeDataOnCache(request.url, response.clone());
-        }
-        return response;
+        response = await fetch(request);
     } catch (requestError) {
-        if (
-            request.method === "GET" &&
-            requestError instanceof TypeError &&
-            fetchErrorMessages.includes(requestError.message)
-        ) {
-            if (sessionInfo?.length && !isDebugAssets) {
-                const cachedResponse = await readDataOnCache(request.url);
-                if (cachedResponse) {
-                    return cachedResponse;
-                }
-            }
-            const offlinePage = await readDataOnCache(offLineURL);
-            if (offlinePage) {
-                return offlinePage;
-            }
+        const cache = await caches.open(pageCacheName);
+        const savedPage = canSave && (await readSavedPage(cache));
+        const offlinePage = savedPage || (await cache.match(offlineURL));
+        if (offlinePage) {
+            return offlinePage;
         }
         throw requestError;
     }
+    if (isWebclientURL(url) && generation === pageGeneration) {
+        if (invalidatesSavedPage(response)) {
+            event.waitUntil(clearSavedPage().catch(() => {}));
+        } else if (canSave && response.ok && !response.redirected) {
+            event.waitUntil(savePage(response.clone(), generation).catch(() => {}));
+        }
+    }
+    return response;
+};
+
+const invalidatesSavedPage = (response) =>
+    // The browser follows a manual navigation redirect itself. Its target is
+    // hidden from the worker, so we cannot rule out a redirect to login.
+    response.type === "opaqueredirect" ||
+    (response.redirected && new URL(response.url).pathname === "/web/login");
+
+const isBundleFile = (url) =>
+    url.origin === self.location.origin &&
+    /^\/web\/assets\/(?:[^/]+\/)*[a-f0-9]{7}\/[^/]+\.min\.(?:js|css)$/.test(url.pathname);
+
+const isBundleDescriptor = (url) =>
+    url.origin === self.location.origin &&
+    /^\/web\/bundle\/[^/]+$/.test(url.pathname) &&
+    url.searchParams.has("registry_hash") &&
+    !usesDebugAssets(url);
+
+const getBundleAssetType = (url) => {
+    const type = url.searchParams.get("offline_asset_type");
+    return type === "css" || type === "js" ? type : null;
+};
+
+const hasBundleFiles = async (cache, descriptor, assetType) => {
+    const files = descriptor
+        .filter(({ src }) => src)
+        .map(({ src }) => new URL(src, self.location.origin))
+        .filter(isBundleFile)
+        .filter((url) => !assetType || url.pathname.endsWith(`.min.${assetType}`));
+    async function isSaved(file) {
+        if (await cache.match(file.href)) {
+            return true;
+        }
+        // An uncontrolled page may have loaded the file without notifying the worker.
+        await copyBundleFromHttpCache(file).catch(() => {});
+        return Boolean(await cache.match(file.href));
+    }
+    return (await Promise.all(files.map(isSaved))).every(Boolean);
+};
+
+const saveBundleDescriptor = async (cache, request, response) => {
+    const descriptor = await response.json();
+    if (!Array.isArray(descriptor)) {
+        return;
+    }
+    const latestCache = await caches.open(bundleDescriptorCacheName);
+    const previous = await latestCache.match(request);
+    if (previous) {
+        const previousDescriptor = await previous.json();
+        if (JSON.stringify(previousDescriptor) === JSON.stringify(descriptor)) {
+            return;
+        }
+        // Keep the last complete bundle before recording a replacement. Check at
+        // descriptor reads/writes, not at every asset load or in worker memory.
+        const assetType = getBundleAssetType(new URL(request.url || request, self.location.origin));
+        if (await hasBundleFiles(cache, previousDescriptor, assetType)) {
+            await cache.put(request, Response.json(previousDescriptor));
+        }
+    }
+    await latestCache.put(request, Response.json(descriptor));
+};
+
+const saveBundle = async (request, response, descriptor) => {
+    const contentType = response.headers.get("Content-Type") || "";
+    const expectedType = descriptor ? /application\/json/ : /javascript|text\/css/;
+    if (response.status !== 200 || response.redirected || !expectedType.test(contentType)) {
+        return;
+    }
+    const cache = await caches.open(bundleCacheName);
+    if (descriptor) {
+        await saveBundleDescriptor(cache, request, response);
+    } else if (!(await cache.match(request))) {
+        await cache.put(request, response);
+    } else {
+        await response.body?.cancel();
+    }
+};
+
+const copyBundleFromHttpCache = async (url) => {
+    const response = await fetch(url, { cache: "only-if-cached", mode: "same-origin" });
+    await saveBundle(url.href, response, false);
+};
+
+const readCachedBundle = async (request, descriptor) => {
+    const cache = await caches.open(bundleCacheName);
+    if (!descriptor) {
+        return cache.match(request);
+    }
+    const latestCache = await caches.open(bundleDescriptorCacheName);
+    const url = new URL(request.url);
+    const assetType = getBundleAssetType(url);
+    const hasRequestedFiles = async (entry) =>
+        entry && hasBundleFiles(cache, await entry.clone().json(), assetType);
+    async function readDescriptor(key) {
+        // The writer saves the fallback before publishing a replacement. Read
+        // the latest first so a concurrent publish cannot hide the fallback.
+        const latest = await latestCache.match(key);
+        if (await hasRequestedFiles(latest)) {
+            return latest;
+        }
+        const previous = await cache.match(key);
+        if (await hasRequestedFiles(previous)) {
+            return previous;
+        }
+    }
+    const usable = await readDescriptor(request);
+    if (usable || !assetType) {
+        return usable;
+    }
+    // A subset may be requested offline for the first time even though the
+    // full bundle already has the needed files.
+    url.searchParams.delete("offline_asset_type");
+    return readDescriptor(url.href);
+};
+
+const fetchBundle = async (event, descriptor) => {
+    let response;
+    try {
+        // Preserve the regular HTTP cache policy before trying Cache Storage.
+        response = await fetch(event.request);
+    } catch (error) {
+        const cached = await readCachedBundle(event.request, descriptor);
+        if (cached) {
+            return cached;
+        }
+        throw error;
+    }
+    event.waitUntil(saveBundle(event.request, response.clone(), descriptor).catch(() => {}));
+    return response;
+};
+
+const primeBundleFiles = async (bundles) => {
+    if (!Array.isArray(bundles)) {
+        return;
+    }
+    async function copyBundle(bundle) {
+        if (typeof bundle !== "string") {
+            return;
+        }
+        const bundleURL = new URL(bundle, self.location.origin);
+        if (isBundleFile(bundleURL)) {
+            // The first document has loaded these files outside the worker. Copy them
+            // from the HTTP cache rather than downloading them again.
+            await copyBundleFromHttpCache(bundleURL);
+        }
+    }
+    await Promise.allSettled(Array.from(new Set(bundles), copyBundle));
+};
+
+const primeWebclient = async ({ url, bundles }) => {
+    const pageURL = new URL(url, self.location.origin);
+    if (!isWebclientURL(pageURL) || usesDebugAssets(pageURL)) {
+        return;
+    }
+    const generation = pageGeneration;
+    await Promise.all([
+        fetch(pageURL).then((response) => {
+            if (generation === pageGeneration && invalidatesSavedPage(response)) {
+                return clearSavedPage();
+            }
+            return savePage(response, generation);
+        }),
+        primeBundleFiles(bundles),
+    ]);
+};
+
+const primeBundle = async ({ source, data: { url, descriptor, bundles } }) => {
+    if (source?.type !== "window" || !isWebclientURL(new URL(source.url))) {
+        return;
+    }
+    if (Array.isArray(descriptor) && typeof url === "string") {
+        const descriptorURL = new URL(url, self.location.origin);
+        if (isBundleDescriptor(descriptorURL)) {
+            await saveBundle(descriptorURL.href, Response.json(descriptor), true);
+        }
+    }
+    await primeBundleFiles(bundles);
 };
 
 const serveShareTarget = (event) => {
@@ -122,18 +307,28 @@ const serveShareTarget = (event) => {
 };
 
 self.addEventListener("fetch", (event) => {
-    if (
-        event.request.method === "POST" &&
-        new URL(event.request.url).searchParams.has("share_target")
-    ) {
+    const { request } = event;
+    const url = new URL(request.url);
+    if (url.origin !== self.location.origin) {
+        return;
+    }
+    if (request.method === "POST" && url.searchParams.has("share_target")) {
         return serveShareTarget(event);
     }
-    if (
-        (event.request.mode === "navigate" && event.request.destination === "document") ||
-        // request.mode = navigate isn't supported in all browsers => check for http header accept:text/html
-        event.request.headers.get("accept").includes("text/html")
+    if (request.method !== "GET") {
+        return;
+    }
+    const descriptor = isBundleDescriptor(url);
+    if (descriptor || isBundleFile(url)) {
+        event.respondWith(fetchBundle(event, descriptor));
+    } else if (
+        (request.mode === "navigate" && request.destination === "document") ||
+        // Some browsers do not set mode to navigate.
+        request.headers.get("accept")?.includes("text/html")
     ) {
-        event.respondWith(navigateOrDisplayOfflinePage(event.request));
+        if (isWebclientURL(url) || url.pathname === scopePath || url.pathname === offlineURL) {
+            event.respondWith(navigateOrDisplayOfflinePage(event, url));
+        }
     }
 });
 
@@ -212,6 +407,14 @@ const waitingMessage = async (message, clientId = false, { signal } = {}) => {
 };
 
 self.addEventListener("message", (event) => {
+    if (event.data?.type === "cache_webclient") {
+        event.waitUntil(primeWebclient(event.data).catch(() => {}));
+        return;
+    }
+    if (event.data?.type === "cache_bundle") {
+        event.waitUntil(primeBundle(event).catch(() => {}));
+        return;
+    }
     if (typeof event.data !== "string") {
         return;
     }
@@ -229,6 +432,6 @@ self.addEventListener("message", (event) => {
         forgetMessage(clientId, event.data);
     }
     if (event.data === "user_logout") {
-        sessionInfo = null;
+        event.waitUntil(clearSavedPage().catch(() => {}));
     }
 });

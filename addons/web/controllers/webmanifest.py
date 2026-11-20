@@ -84,20 +84,16 @@ class WebManifest(http.Controller):
             'Content-Type': 'application/manifest+json'
         })
 
-    @http.route('/web/service-worker.js', type='http', auth='public', methods=['GET'], readonly=True)
+    @http.route(['/web/service-worker.js', '/web/scoped-app-service-worker.js'], type='http', auth='public', methods=['GET'], readonly=True)
     def service_worker(self):
-        response = request.make_response(
-            self._get_service_worker_content(),
-            [
-                ('Content-Type', 'text/javascript'),
-                ('Service-Worker-Allowed', '/odoo'),
-            ]
-        )
-        return response
+        scope = '/scoped_app' if request.httprequest.path == '/web/scoped-app-service-worker.js' else '/odoo'
+        return request.make_response(self._get_service_worker_content(), [
+            ('Content-Type', 'text/javascript'),
+            ('Service-Worker-Allowed', scope),
+        ])
 
     def _get_service_worker_content(self):
-        """ Returns a ServiceWorker javascript file scoped for the backend (aka. '/odoo')
-        """
+        """Return the worker script shared by the backend and scoped apps."""
         with file_open('web/static/src/service_worker.js') as f:
             body = f.read()
             return body

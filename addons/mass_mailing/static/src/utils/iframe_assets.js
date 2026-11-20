@@ -9,7 +9,7 @@ const CSSSheetsCache = new Map();
  * @returns {Promise<Array<CSSStyleSheet>>}
  */
 export async function getStyleSheets(scope, iframe, assetName) {
-    const { cssLibs } = await getBundle(assetName);
+    const { cssLibs } = await getBundle(assetName, { js: false });
     const loadCSSPromises = [];
     if (cssLibs) {
         loadCSSPromises.push(...cssLibs.map((url) => loadCSSSheets(url)));

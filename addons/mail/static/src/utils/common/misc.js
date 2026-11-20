@@ -205,7 +205,7 @@ export const hasHardwareAcceleration = memoize(() => {
  */
 export async function loadCssFromBundle(targetNode, bundleName) {
     try {
-        const res = await getBundle(bundleName);
+        const res = await getBundle(bundleName, { js: false });
         for (const url of res.cssLibs) {
             const link = document.createElement("link");
             link.rel = "stylesheet";
