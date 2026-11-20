@@ -325,6 +325,7 @@ test("prefetched view layouts are served from the normal cache while offline", a
         expect.step(kwargs.views);
     });
     await mountWithCleanup(WebClient);
+    await getService("mail.store").isReadyPromise;
     const view = getService("view");
     const params = { resModel: "crm.lead", views: [[false, "form"]], context: {} };
     await view.prefetchViews(params);
@@ -341,10 +342,11 @@ test("CRM dependent-app action and object buttons are unavailable offline", asyn
         type: "form",
         resModel: "crm.lead",
         resId: 1,
-        arch: `<form><header>
+        arch: `<form><sheet>
             <button name="action_sale_quotations_new" string="New Quotation" type="object"/>
             <button name="2" string="SMS" type="action"/>
-        </header><field name="name"/></form>`,
+            <field name="name"/>
+        </sheet></form>`,
     });
     expect("button[name='action_sale_quotations_new']").not.toHaveAttribute("aria-disabled");
     expect("button[name='2']").not.toHaveAttribute("aria-disabled");
