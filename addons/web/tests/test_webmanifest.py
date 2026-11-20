@@ -157,6 +157,32 @@ class WebManifestRoutesTest(HttpCaseWithUserDemo):
             }
         """)
 
+    def test_offline_descriptor_reuses_files_in_http_cache(self):
+        self._test_worker_cache("""
+            const full = new URL('/web/bundle/web.assets_backend_lazy?registry_hash=test', self.location.origin);
+            const files = await (await fetch(full)).json();
+            const { src } = files.find(({ type, src }) =>
+                type === 'link' && src && isBundleFile(new URL(src, self.location.origin))
+            );
+            const stylesheet = new URL(src, self.location.origin);
+            // An uncontrolled page can load a stylesheet without notifying the worker.
+            const response = await fetch(stylesheet);
+            if (!response.ok) {
+                throw new Error('Failed to warm the stylesheet in the HTTP cache');
+            }
+            await response.arrayBuffer();
+            const cache = await caches.open(bundleCacheName);
+            await saveBundleDescriptor(cache, full.href, Response.json(files));
+            if (await cache.match(stylesheet.href)) {
+                throw new Error('The stylesheet must start out in the HTTP cache only');
+            }
+
+            const cssOnly = new Request(full.href + '&offline_asset_type=css');
+            if (!(await readCachedBundle(cssOnly, true)) || !(await cache.match(stylesheet.href))) {
+                throw new Error('Offline descriptor lookup did not recover the HTTP-cached stylesheet');
+            }
+        """)
+
     def test_offline_url(self):
         """
         This route returns the offline page

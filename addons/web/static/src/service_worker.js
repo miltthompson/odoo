@@ -133,13 +133,24 @@ const getBundleAssetType = (url) => {
     return type === "css" || type === "js" ? type : null;
 };
 
-const hasBundleFiles = async (cache, descriptor, assetType) => {
+const hasBundleFiles = async (cache, descriptor, assetType, checkHttpCache = false) => {
     const files = descriptor
         .filter(({ src }) => src)
         .map(({ src }) => new URL(src, self.location.origin))
         .filter(isBundleFile)
         .filter((url) => !assetType || url.pathname.endsWith(`.min.${assetType}`));
-    return (await Promise.all(files.map((file) => cache.match(file.href)))).every(Boolean);
+    async function isSaved(file) {
+        if (await cache.match(file.href)) {
+            return true;
+        }
+        if (checkHttpCache) {
+            // An uncontrolled page may have loaded the file without notifying the worker.
+            await copyBundleFromHttpCache(file).catch(() => {});
+            return Boolean(await cache.match(file.href));
+        }
+        return false;
+    }
+    return (await Promise.all(files.map(isSaved))).every(Boolean);
 };
 
 const saveBundleDescriptor = async (cache, request, response) => {
@@ -180,6 +191,11 @@ const saveBundle = async (request, response, descriptor) => {
     }
 };
 
+const copyBundleFromHttpCache = async (url) => {
+    const response = await fetch(url, { cache: "only-if-cached", mode: "same-origin" });
+    await saveBundle(url.href, response, false);
+};
+
 const readCachedBundle = async (request, descriptor) => {
     const cache = await caches.open(bundleCacheName);
     if (!descriptor) {
@@ -189,7 +205,7 @@ const readCachedBundle = async (request, descriptor) => {
     const url = new URL(request.url);
     const assetType = getBundleAssetType(url);
     const hasRequestedFiles = async (entry) =>
-        entry && hasBundleFiles(cache, await entry.clone().json(), assetType);
+        entry && hasBundleFiles(cache, await entry.clone().json(), assetType, true);
     async function readDescriptor(key) {
         // The writer saves the fallback before publishing a replacement. Read
         // the latest first so a concurrent publish cannot hide the fallback.
@@ -240,8 +256,7 @@ const primeBundleFiles = async (bundles) => {
         if (isBundleFile(bundleURL)) {
             // The first document has loaded these files outside the worker. Copy them
             // from the HTTP cache rather than downloading them again.
-            const response = await fetch(bundleURL, { cache: "only-if-cached", mode: "same-origin" });
-            await saveBundle(bundleURL.href, response, false);
+            await copyBundleFromHttpCache(bundleURL);
         }
     }
     await Promise.allSettled(Array.from(new Set(bundles), copyBundle));
