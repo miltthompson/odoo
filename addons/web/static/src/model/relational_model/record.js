@@ -396,7 +396,11 @@ export class Record extends DataPoint {
                 this._parseOfflineValues(scheduledORM.value.extras.changes)
             );
             this._offlineTimeStamp = scheduledORM.value.extras.timeStamp;
-            return this.update(this._offlineChanges);
+            return this.model.mutex.exec(async () => {
+                await this._update(this._offlineChanges);
+                // Reopening a queued change loads saved data; it is not another edit.
+                this._commitSave();
+            });
         }
     }
 
@@ -1239,7 +1243,7 @@ export class Record extends DataPoint {
         }
         const changes = this._getChanges();
         delete changes.id; // id never changes, and should not be written
-        if (!creation && !Object.keys(changes).length) {
+        if ((!creation || this._offlineId) && !Object.keys(changes).length) {
             if (nextId) {
                 return this.model.load({ resId: nextId });
             }
@@ -1391,14 +1395,14 @@ export class Record extends DataPoint {
     async _offlineSave() {
         const key = window.crypto.randomUUID();
         this._offlineChanges = markRaw({ ...(this._offlineChanges || {}), ...this._changes });
-        const offlineChanges = this._getChanges(this._offlineChanges);
-        delete offlineChanges.id; // id never changes, and should not be written
+        const changes = this._getChanges();
+        delete changes.id; // id never changes, and should not be written
 
         this._offlineTimeStamp = this._offlineTimeStamp || Date.now();
         this._offlineId = this.model.offlinePlugin.scheduleORM(
             this.resModel,
             "web_save",
-            [this.resId ? [this.resId] : [], offlineChanges],
+            [this.resId ? [this.resId] : [], changes],
             { context: this.context, specification: {} }, //Here for the kwargs we don't need the specification or the next_id
             {
                 id: this._offlineId,
