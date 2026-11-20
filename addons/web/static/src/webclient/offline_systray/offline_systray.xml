@@ -4,7 +4,8 @@
     <t t-name="web.OfflineSystray">
         <span t-if="this.offlinePlugin.isOffline() or this.offlinePlugin.hasScheduledCalls" class="position-relative">
         <Dropdown
-            navigationOptions="{ 'shouldFocusChildInput': false }"
+            state="this.dropdown"
+            navigationOptions="this.navigationOptions"
             disabled="!this.offlinePlugin.hasScheduledCalls">
             <div
                 t-if="this.uiService.isSmall"
@@ -66,7 +67,7 @@
                                     <span t-out="element.description"/> · <time t-out="element.timeStamp"/>
                                     <small class="d-block" t-out="element.stateLabel"/>
                                     <small t-if="element.reason" class="d-block text-danger" t-out="element.reason"/>
-                                    <button t-if="element.clickable" type="button" class="btn btn-link p-0 me-2" data-available-offline="" t-on-click.stop="() => this.openView(element.entry)">Open</button>
+                                    <button t-if="element.clickable" type="button" class="btn btn-link p-0 me-2" data-available-offline="" t-on-click.stop="() => this.openView(element.entry, true)">Open</button>
                                     <button t-if="element.retryKey" type="button" class="btn btn-link p-0" data-available-offline="" t-att-disabled="this.offlinePlugin.syncingORM()" t-on-click.stop="() => this.offlinePlugin.retryPendingChange(element.retryKey)">Retry</button>
                                 </span>
                                 <div>
@@ -86,7 +87,10 @@
         </Dropdown>
         <span t-if="this.pendingCount" class="o_offline_pending_count badge rounded-pill text-bg-primary position-absolute top-0 end-0 pe-none" aria-hidden="true" t-out="this.pendingCount"/>
         </span>
-        <span aria-live="polite" aria-atomic="true" class="visually-hidden" t-out="this.announcement()"/>
+        <span aria-live="polite" aria-atomic="true" class="visually-hidden">
+            <span t-if="this.announcement().alternate" t-out="this.announcement().text"/>
+            <span t-else="" t-out="this.announcement().text"/>
+        </span>
     </t>
 
     <t t-name="web.OfflineSystrayTooltip">

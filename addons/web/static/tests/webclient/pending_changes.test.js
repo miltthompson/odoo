@@ -1,4 +1,4 @@
-import { animationFrame, expect, queryAllTexts, runAllTimers, test } from "@odoo/hoot";
+import { animationFrame, expect, press, queryAllTexts, queryOne, runAllTimers, test } from "@odoo/hoot";
 import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { WebClient } from "@web/webclient/webclient";
 import { contains, getService, mockOffline, mountWithCleanup, onRpc } from "@web/../tests/web_test_helpers";
@@ -53,8 +53,31 @@ test("a rejected change shows its reason and can be retried", async () => {
         "Needs attention", "You no longer have access to this record.",
     ]);
     blocked = false;
-    await contains(".o_offline_pending_details button:contains(Retry)").click();
+    queryOne(".o_offline_pending_item").focus();
+    queryOne(".o_offline_pending_details button:contains(Retry)").focus();
+    await press("Enter");
     await runAllTimers();
     await animationFrame();
-    expect("[aria-live='polite'].visually-hidden").toHaveText("All changes sent");
+    const liveRegion = "[aria-live='polite'].visually-hidden";
+    expect(liveRegion).toHaveText("All changes sent");
+    const firstAnnouncement = queryOne(`${liveRegion} span`);
+    schedule(offline, 2, "Second successful edit", 20);
+    await offline._syncORM();
+    await animationFrame();
+    expect(queryOne(`${liveRegion} span`)).not.toBe(firstAnnouncement);
+    expect(liveRegion).toHaveText("All changes sent");
+});
+
+test("session expiry is announced without opening the pending-changes panel", async () => {
+    onRpc("/web/offline/sync", () => new Response(JSON.stringify({ error: {
+        code: 100,
+        data: { name: "odoo.http.session.SessionExpiredException" },
+    } })));
+    await mountWithCleanup(WebClient);
+    await runAllTimers();
+    const offline = getService(OfflinePlugin);
+    schedule(offline, 1, "My edit", 1);
+    await offline._syncORM();
+    await animationFrame();
+    expect("[aria-live='polite'].visually-hidden").toHaveText("Log in again to send changes. Pending changes: 1");
 });

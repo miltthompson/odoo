@@ -4,6 +4,7 @@ import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { useBus, useService } from "@web/core/utils/hooks";
 import { Dropdown } from "@web/core/dropdown/dropdown";
 import { DropdownItem } from "@web/core/dropdown/dropdown_item";
+import { useDropdownState } from "@web/core/dropdown/dropdown_hooks";
 import { _t } from "../../core/l10n/translation";
 import { formatDateTime } from "@web/core/l10n/dates";
 import { ConfirmationDialog } from "@web/core/confirmation_dialog/confirmation_dialog";
@@ -33,11 +34,14 @@ function describeChange(entry, recordName) {
     }
     switch (entry.method) {
         case "web_save": {
+            if (!entry.args[0]?.length) {
+                return _t("Created %s", recordName);
+            }
             const stageName = entry.extras?.changes?.stage_id?.display_name;
             if (stageName) {
                 return _t("Moved %(record)s to %(stage)s", { record: recordName, stage: stageName });
             }
-            return entry.args[0]?.length ? _t("Edited %s", recordName) : _t("Created %s", recordName);
+            return _t("Edited %s", recordName);
         }
         case "action_archive":
             return _t("Archived %s", recordName);
@@ -60,18 +64,24 @@ class OfflineSystray extends Component {
         this.actionService = useService("action");
         this.dialogService = useService("dialog");
         this.uiService = useService("ui");
+        this.dropdown = useDropdownState();
         let previous;
         let sent = false;
+        let alternate = false;
         useBus(rpcBus, "OFFLINE:SYNCED", () => (sent = true));
         useEffect(() => {
             const offline = this.offlinePlugin.isOffline();
             const issues = this.offlinePlugin.getPendingEntries().filter((entry) => entry.state === "needs_attention").length;
+            const paused = this.offlinePlugin.syncPaused();
             const syncing = this.offlinePlugin.syncingORM();
             const count = this.pendingCount;
             const announcement = [];
             if (previous) {
                 if (offline !== previous.offline) {
                     announcement.push(offline ? _t("Working offline") : _t("Back online"));
+                }
+                if (paused && !previous.paused) {
+                    announcement.push(_t("Log in again to send changes. Pending changes: %s", count));
                 }
                 if (!syncing && issues && (previous.syncing || issues !== previous.issues)) {
                     announcement.push(_t("Changes need your attention: %s", issues));
@@ -83,13 +93,24 @@ class OfflineSystray extends Component {
                 sent = false;
             }
             if (announcement.length) {
-                this.announcement.set(announcement.join(". "));
+                alternate = !alternate;
+                this.announcement.set({ text: announcement.join(". "), alternate });
             }
-            previous = { offline, issues, syncing };
+            previous = { offline, issues, paused, syncing };
         });
     }
 
-    announcement = signal("");
+    announcement = signal({ text: "", alternate: false });
+
+    navigationOptions = {
+        shouldFocusChildInput: false,
+        hotkeys: {
+            enter: {
+                isAvailable: ({ navigator, target }) =>
+                    Boolean(navigator.activeItem) && !target?.closest?.(".o_offline_pending_item button"),
+            },
+        },
+    };
 
     get pendingCount() {
         return this.offlinePlugin.getPendingEntries().length + this.offlinePlugin.getLegacyPendingCount();
@@ -165,7 +186,7 @@ class OfflineSystray extends Component {
     });
 
     isClickable(value) {
-        const resId = value.args[0]?.[0] || false;
+        const resId = (value.legacyArgs || value.args)[0]?.[0] || false;
         return (
             value.method === "web_save" &&
             value.extras?.viewType === "form" &&
@@ -252,11 +273,13 @@ class OfflineSystray extends Component {
         });
     }
 
-    async openView(entry) {
-        const resId = entry.args[0]?.[0];
+    async openView(entry, exact = false) {
+        this.dropdown.close();
+        const resId = (entry.legacyArgs || entry.args)[0]?.[0];
+        const siblings = this.offlinePlugin.getPendingEntries().filter((item) => item.legacyKey === entry.legacyKey);
         await this.actionService.doAction(entry.extras.actionId, {
             viewType: "form",
-            props: { offlineId: entry.legacyKey, resId },
+            props: { offlineId: exact || siblings.length > 1 ? entry.key : entry.legacyKey, resId },
             clearBreadcrumbs: true,
         });
     }
