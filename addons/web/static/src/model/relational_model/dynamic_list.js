@@ -1,6 +1,7 @@
 import { ConfirmationDialog } from "@web/core/confirmation_dialog/confirmation_dialog";
 import { _t } from "@web/core/l10n/translation";
 import { ConnectionLostError } from "@web/core/network/rpc";
+import { isOfflineRecordId } from "@web/core/offline/offline_id";
 import { x2ManyCommands } from "@web/core/orm_plugin";
 import { unique } from "@web/core/utils/arrays";
 import { deepEqual } from "@web/core/utils/objects";
@@ -481,6 +482,20 @@ export class DynamicList extends DataPoint {
             return false;
         }
         const resIds = records.map((record) => record.resId);
+        const queueOffline = async () => {
+            let saved = false;
+            try {
+                saved = await this._saveRecordsOffline(records);
+                return saved;
+            } finally {
+                if (!saved) {
+                    undoFns.forEach((undo) => undo());
+                }
+            }
+        };
+        if (resIds.some(isOfflineRecordId)) {
+            return queueOffline();
+        }
         const [vals] = valsList;
         let values;
         try {
@@ -492,15 +507,7 @@ export class DynamicList extends DataPoint {
                 : await this.model.orm.webSaveMulti(this.resModel, resIds, valsList, kwargs);
         } catch (e) {
             if (e instanceof ConnectionLostError) {
-                let saved = false;
-                try {
-                    saved = await this._saveRecordsOffline(records);
-                    return saved;
-                } finally {
-                    if (!saved) {
-                        undoFns.forEach((undo) => undo());
-                    }
-                }
+                return queueOffline();
             }
             undoFns.forEach((undo) => undo());
             throw e;
@@ -518,7 +525,10 @@ export class DynamicList extends DataPoint {
     }
 
     async _saveRecordsOffline(records) {
-        const saves = records.map((record) => record._prepareOfflineSave());
+        const saves = await Promise.all(records.map((record) => record._prepareOfflineSave()));
+        if (saves.some((save) => !save)) {
+            return false;
+        }
         const keys = await this.model.offlinePlugin.scheduleORMBatch(saves.map(({ call }) => call));
         if (!keys) {
             return false;
@@ -528,7 +538,7 @@ export class DynamicList extends DataPoint {
     }
 
     async _resequence(originalList, resModel, movedIds, targetId) {
-        if (this.resModel === resModel && !this.canResequence()) {
+        if (this.model.offlinePlugin.isOffline() || (this.resModel === resModel && !this.canResequence())) {
             return;
         }
         const handleField = this.resModel === resModel ? this.handleField : DEFAULT_HANDLE_FIELD;

@@ -1152,6 +1152,9 @@ export class StaticList extends DataPoint {
     }
 
     async _resequence(movedId, targetId) {
+        if (this.model.offlinePlugin.isOffline()) {
+            return;
+        }
         const records = [...this.records];
         const order = this.orderBy.find((o) => o.name === this.handleField);
         const asc = !order || order.asc;

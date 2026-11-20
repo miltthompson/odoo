@@ -4,7 +4,9 @@ import { EventBus, markRaw, usePlugin, toRaw } from "@odoo/owl";
 import { makeContext } from "@web/core/context";
 import { Domain } from "@web/core/domain";
 import { WarningDialog } from "@web/core/errors/error_dialogs";
-import { ConnectionLostError } from "@web/core/network/rpc";
+import { ConnectionLostError, rpcBus } from "@web/core/network/rpc";
+import { isOfflineRecordId } from "@web/core/offline/offline_id";
+import { useBus } from "@web/core/utils/hooks";
 import { shallowEqual } from "@web/core/utils/arrays";
 import { KeepLast, Mutex } from "@web/core/utils/concurrency";
 import { deepCopy, pick } from "@web/core/utils/objects";
@@ -14,6 +16,7 @@ import { DynamicGroupList } from "./dynamic_group_list";
 import { DynamicRecordList } from "./dynamic_record_list";
 import { FetchRecordError } from "./errors";
 import { Group } from "./group";
+import { getOfflineOverlay, overlayGroups, overlayList } from "./offline_overlay";
 import { Record as RelationalRecord } from "./record";
 import { StaticList } from "./static_list";
 import {
@@ -126,6 +129,7 @@ export class RelationalModel extends Model {
     static DEFAULT_GROUP_LIMIT = 80;
     static DEFAULT_OPEN_GROUP_LIMIT = 10; // TODO: remove ?
     static withCache = true;
+    static offlineOverlay = false;
 
     offlinePlugin = usePlugin(OfflinePlugin);
 
@@ -174,6 +178,27 @@ export class RelationalModel extends Model {
 
         this._urgentSave = false;
         this.couldNotLoadRootOffline = false;
+        useBus(rpcBus, "OFFLINE:SYNCED", ({ detail: { entry } }) => {
+            if (this.root?.config.isMonoRecord && entry.model === this.config.resModel &&
+                entry.createdId && entry.createdId === this.root.resId && !this.root.dirty) {
+                this.load({ resId: entry.createdId });
+            }
+        });
+    }
+
+    /** The pending values by record ID, in queue order. Overrides can extend the projection. */
+    getOfflineOverlay(config = this.config, resId = false) {
+        const entries = this.offlinePlugin.getPendingEntries();
+        return getOfflineOverlay(resId ? entries.filter((entry) => entry.target.ids.includes(resId)) : entries, config.resModel, config.context);
+    }
+
+    async _getOfflineOverlayOnLoad(config, resId = false) {
+        await this.offlinePlugin.getQueueReady();
+        return this.getOfflineOverlay(config, resId);
+    }
+
+    get shouldApplyOfflineOverlay() {
+        return this.constructor.offlineOverlay && this.offlinePlugin.isOffline();
     }
 
     // -------------------------------------------------------------------------
@@ -519,7 +544,27 @@ export class RelationalModel extends Model {
             if (!config.resId) {
                 return this._loadNewRecord(config, { evalContext, cache });
             }
+            if (isOfflineRecordId(config.resId)) {
+                await this.offlinePlugin.getQueueReady();
+                const change = this.getOfflineOverlay(config, config.resId).get(config.resId);
+                if (change?.created && change.patch) {
+                    return { ...change.patch, id: config.resId };
+                }
+                const resolved = await this.offlinePlugin.resolveOfflineRecord(config.resModel, config.resId);
+                if (!resolved) {
+                    throw new FetchRecordError([config.resId]);
+                }
+                config.resIds = (config.resIds || []).map((id) => id === config.resId ? resolved.id : id);
+                config.resId = resolved.id;
+            }
             const records = await this._loadRecords(config, evalContext, cache);
+            if (this.shouldApplyOfflineOverlay) {
+                const overlay = await this._getOfflineOverlayOnLoad(config, config.resId);
+                const pending = overlay.get(config.resId)?.patch;
+                if (pending) {
+                    return { ...records[0], ...pending };
+                }
+            }
             return records[0];
         }
         if (config.resIds) {
@@ -560,7 +605,13 @@ export class RelationalModel extends Model {
         }
         config.groups = config.groups || {};
 
-        const response = await this._webReadGroup(config, cache);
+        let response = await this._webReadGroup(config, cache);
+        if (this.shouldApplyOfflineOverlay) {
+            const overlay = await this._getOfflineOverlayOnLoad(config);
+            if (overlay.size) {
+                response = overlayGroups(response, config, overlay);
+            }
+        }
         return this._postprocessReadGroup(config, response);
     }
 
@@ -777,7 +828,14 @@ export class RelationalModel extends Model {
                 config.countLimit !== Number.MAX_SAFE_INTEGER ? config.countLimit + 1 : undefined,
         };
         const orm = cache ? this.orm.cache(cache) : this.orm;
-        return orm.webSearchRead(config.resModel, config.domain, kwargs);
+        const result = await orm.webSearchRead(config.resModel, config.domain, kwargs);
+        if (this.shouldApplyOfflineOverlay) {
+            const overlay = await this._getOfflineOverlayOnLoad(config);
+            if (overlay.size) {
+                return overlayList(result, config, overlay);
+            }
+        }
+        return result;
     }
 
     _displayOnchangeWarning(warning) {
@@ -834,6 +892,9 @@ export class RelationalModel extends Model {
         { changes = {}, fieldNames = [], evalContext = config.context, onError, cache }
     ) {
         const { fields, activeFields, resModel, resId } = config;
+        if (isOfflineRecordId(resId)) {
+            return {};
+        }
         let context = config.context;
         if (fieldNames.length === 1) {
             const fieldContext = config.activeFields[fieldNames[0]].context;

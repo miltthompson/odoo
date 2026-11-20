@@ -225,6 +225,14 @@ export class KanbanQuickCreateController extends Component {
         }
         this.state.disabled = true;
         const { resId, isValid } = await this.save();
+        if (resId < 0) {
+            if (this.model.shouldApplyOfflineOverlay) {
+                await this.props.onValidate(resId, mode);
+            }
+            this.props.quickCreateState.closeQuickCreate();
+            this.state.disabled = false;
+            return true;
+        }
         if (resId) {
             this.props.onValidate(resId, mode);
             if (mode === "add") {

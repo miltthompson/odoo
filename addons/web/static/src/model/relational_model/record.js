@@ -2,6 +2,7 @@ import { markRaw, markup, toRaw } from "@odoo/owl";
 import { serializeDate, serializeDateTime } from "@web/core/l10n/dates";
 import { _t } from "@web/core/l10n/translation";
 import { ConnectionLostError, RPCError } from "@web/core/network/rpc";
+import { isOfflineRecordId, offlineRecordId } from "@web/core/offline/offline_id";
 import { evaluateBooleanExpr } from "@web/core/py_js/py";
 import { pick } from "@web/core/utils/objects";
 import { DataPoint } from "./datapoint";
@@ -100,7 +101,7 @@ export class Record extends DataPoint {
      */
     _setData(data, { orderBys, keepChanges } = {}) {
         this._isEvalContextReady = false;
-        if (this.resId) {
+        if (this.resId && !isOfflineRecordId(this.resId)) {
             this._values = this._parseServerValues(data, { orderBys });
             Object.assign(this._textValues, this._getTextValues(data));
         } else {
@@ -193,20 +194,15 @@ export class Record extends DataPoint {
         return this.model.mutex.exec(async () => {
             let unlinked = false;
             try {
+                if (isOfflineRecordId(this.resId)) {
+                    return this._queueOfflineRecordCall("web_unlink");
+                }
                 unlinked = await this.model.orm.webUnlink(this.resModel, [this.resId], {
                     context: this.context,
                 });
             } catch (e) {
                 if (e instanceof ConnectionLostError) {
-                    return this.model.offlinePlugin.scheduleORM(
-                        this.resModel,
-                        "web_unlink",
-                        [[this.resId]],
-                        { context: this.context },
-                        {
-                            extras: getScheduleORMExtras(this.model, [this]),
-                        }
-                    );
+                    return this._queueOfflineRecordCall("web_unlink");
                 }
                 throw e;
             }
@@ -378,9 +374,13 @@ export class Record extends DataPoint {
     }
 
     setOfflineChanges(id) {
+        if (isOfflineRecordId(this.resId)) {
+            return;
+        }
         let scheduledORM;
+        let entry;
         if (id) {
-            const entry = this.model.offlinePlugin.getPendingEntries().find((item) => item.key === id);
+            entry = this.model.offlinePlugin.getPendingEntries().find((item) => item.key === id);
             scheduledORM = entry
                 ? { key: entry.legacyKey, value: entry }
                 : this.model.offlinePlugin._ormToSync()[id];
@@ -395,15 +395,21 @@ export class Record extends DataPoint {
         }
         if (scheduledORM) {
             this._offlineId = scheduledORM.key;
-            this._offlineChanges = markRaw(
-                this._parseOfflineValues(scheduledORM.value.extras.changes)
-            );
-            this._offlineTimeStamp = scheduledORM.value.extras.timeStamp;
-            return this.model.mutex.exec(async () => {
-                await this._update(this._offlineChanges);
-                // Reopening a queued change loads saved data; it is not another edit.
-                this._commitSave();
-            });
+            entry ||= this.model.offlinePlugin.getPendingEntry(scheduledORM.key);
+            if (entry?.createdId) {
+                // The original dropdown link may open the cached blank form. Turn it into
+                // the saved local record, so a further save is a write, not another create.
+                this.config.resId = entry.createdId;
+                this.config.resIds = [entry.createdId];
+                const change = this.model.getOfflineOverlay(this.config, this.resId).get(this.resId);
+                this._setData({ ...this._getDefaultValues(), ...change?.patch, id: this.resId });
+            } else if (!this.model.shouldApplyOfflineOverlay || !entry?.extras?.overlayValues) {
+                return this.model.mutex.exec(async () => {
+                    await this._update(this._parseOfflineValues(scheduledORM.value.extras.changes));
+                    // Reopening a queued change loads saved data; it is not another edit.
+                    this._commitSave();
+                });
+            }
         }
     }
 
@@ -1330,6 +1336,9 @@ export class Record extends DataPoint {
             specification: fieldSpec,
             next_id: nextId,
         };
+        if (isOfflineRecordId(this.resId)) {
+            return this._offlineSave();
+        }
         let records = [];
         try {
             records = await this.model.orm.webSave(
@@ -1395,8 +1404,59 @@ export class Record extends DataPoint {
         this.dirty = false;
     }
 
+    _offlineOverlayValues(values) {
+        const result = {};
+        for (const [name, value] of Object.entries(values)) {
+            const field = this.fields[name];
+            if (!field || name === "id") {
+                continue;
+            }
+            if (["many2many", "one2many"].includes(field.type)) {
+                result[name] = value?._currentIds.map((id) => ({ id, display_name: value._cache[id]?.display_name })) || [];
+            } else {
+                result[name] = this._formatServerValue(field.type, value);
+            }
+        }
+        return result;
+    }
+
+    async _offlineReference() {
+        if (isOfflineRecordId(this.resId)) {
+            const local = this.model.offlinePlugin.getRecordReference(this.resModel, this.resId);
+            const resolved = local ? null : await this.model.offlinePlugin.resolveOfflineRecord(this.resModel, this.resId);
+            return local || (resolved && { value: resolved.id });
+        }
+        return { value: this.resId };
+    }
+
+    async _queueOfflineRecordCall(method) {
+        const reference = await this._offlineReference();
+        if (!reference) {
+            return false;
+        }
+        const keys = await this.model.offlinePlugin.scheduleORMBatch([{
+            model: this.resModel,
+            method,
+            args: [[reference.value]],
+            kwargs: { context: this.context },
+            options: {
+                refs: reference.key ? [reference.key] : [],
+                target: { model: this.resModel, ids: [this.resId] },
+                extras: {
+                    ...getScheduleORMExtras(this.model, [this]),
+                    overlayBefore: this._offlineOverlayValues(this._values),
+                },
+            },
+        }]);
+        return Boolean(keys);
+    }
+
     async _offlineSave() {
-        const { call, onSaved } = this._prepareOfflineSave();
+        const save = await this._prepareOfflineSave();
+        if (!save) {
+            return false;
+        }
+        const { call, onSaved } = save;
         const keys = await this.model.offlinePlugin.scheduleORMBatch([call]);
         if (!keys) {
             return false;
@@ -1405,33 +1465,44 @@ export class Record extends DataPoint {
         return true;
     }
 
-    _prepareOfflineSave() {
-        const offlineChanges = markRaw({ ...(this._offlineChanges || {}), ...this._changes });
-        const changes = this._getChanges(this._changes, { isNew: this.isNew && !this._offlineId });
-        const timeStamp = this._offlineTimeStamp || Date.now();
+    async _prepareOfflineSave() {
+        const creation = this.isNew;
+        const key = window.crypto.randomUUID();
+        const createdId = creation ? offlineRecordId(key) : undefined;
+        const reference = await this._offlineReference();
+        if (!reference) {
+            return;
+        }
+        const changes = this._getChanges();
         return {
             call: {
                 model: this.resModel,
                 method: "web_save",
-                args: [this.resId ? [this.resId] : [], changes],
+                args: [creation ? [] : [reference.value], changes],
                 kwargs: { context: this.context, specification: {} },
                 options: {
                     id: this._offlineId,
+                    key,
+                    createdId,
+                    refs: reference.key ? [reference.key] : [],
+                    target: { model: this.resModel, ids: [createdId || this.resId] },
                     extras: {
                         ...getScheduleORMExtras(this.model, [this]),
-                        changes: this._formatOfflineValues(offlineChanges),
+                        changes: this._formatOfflineValues(this._changes),
                         originalValues: this._formatOfflineValues(
-                            pick(this._values, ...Object.keys(offlineChanges)),
-                            { changes: false }
+                            pick(this._values, ...Object.keys(this._changes)), { changes: false }
                         ),
-                        timeStamp,
+                        overlayValues: this._offlineOverlayValues(creation ? this.data : this._changes),
+                        overlayBefore: creation ? undefined : this._offlineOverlayValues(this._values),
                     },
                 },
             },
             onSaved: (id) => {
                 this._offlineId = id;
-                this._offlineTimeStamp = timeStamp;
-                this._offlineChanges = offlineChanges;
+                if (createdId) {
+                    this.config.resId = createdId;
+                    this.config.resIds = [createdId];
+                }
                 this._commitSave();
             },
         };
@@ -1497,6 +1568,9 @@ export class Record extends DataPoint {
      */
     async _toggleArchive(state) {
         const method = state ? "action_archive" : "action_unarchive";
+        if (isOfflineRecordId(this.resId)) {
+            return this._queueOfflineRecordCall(method);
+        }
         let action;
         try {
             action = await this.model.orm.call(this.resModel, method, [[this.resId]], {
@@ -1504,15 +1578,7 @@ export class Record extends DataPoint {
             });
         } catch (e) {
             if (e instanceof ConnectionLostError) {
-                return this.model.offlinePlugin.scheduleORM(
-                    this.resModel,
-                    method,
-                    [[this.resId]],
-                    { context: this.context },
-                    {
-                        extras: getScheduleORMExtras(this.model, [this]),
-                    }
-                );
+                return this._queueOfflineRecordCall(method);
             }
             throw e;
         }
