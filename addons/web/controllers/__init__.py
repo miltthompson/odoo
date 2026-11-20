@@ -9,6 +9,7 @@ from . import export
 from . import json
 from . import home
 from . import model
+from . import offline
 from . import pivot
 from . import profiling
 from . import report
