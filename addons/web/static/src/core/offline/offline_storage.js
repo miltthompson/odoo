@@ -146,6 +146,16 @@ export class OfflineQueueStore {
         }
     }
 
+    async rememberDraftRecord(key, model, id) {
+        const updates = (await this.list())
+            .filter((entry) => entry.model === model && entry.legacyArgs && entry.refs.includes(key))
+            .map((entry) => ({ ...entry, resolvedResId: id }));
+        if (updates.length) {
+            await this._writeEntries(updates);
+        }
+        return updates;
+    }
+
     async remove(key) {
         await this.db.delete(ENTRIES, key);
         if (!(await this.db.getAllKeys(ENTRIES))?.length) {

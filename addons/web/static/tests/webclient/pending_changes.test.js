@@ -1,7 +1,8 @@
 import { animationFrame, expect, press, queryAllTexts, queryOne, runAllTimers, test } from "@odoo/hoot";
+import { offlineRecordId } from "@web/core/offline/offline_id";
 import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { WebClient } from "@web/webclient/webclient";
-import { contains, getService, mockOffline, mountWithCleanup, onRpc } from "@web/../tests/web_test_helpers";
+import { contains, getService, mockOffline, mountWithCleanup, onRpc, patchWithCleanup } from "@web/../tests/web_test_helpers";
 
 function schedule(offline, id, label, timeStamp) {
     offline.scheduleORM("res.partner", "write", [[id], { name: label }], {}, {
@@ -66,6 +67,75 @@ test("a rejected change shows its reason and can be retried", async () => {
     await animationFrame();
     expect(queryOne(`${liveRegion} span`)).not.toBe(firstAnnouncement);
     expect(liveRegion).toHaveText("All changes sent");
+});
+
+test("Open targets the saved record when a follow-up draft edit is rejected", async () => {
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        if (!params.refs.length) {
+            return [{ id: 47 }];
+        }
+        return new Response(JSON.stringify({ error: {
+            code: 200, data: { name: "odoo.exceptions.ValidationError", message: "Check the name." },
+        } }));
+    });
+    await mountWithCleanup(WebClient);
+    await runAllTimers();
+    const offline = getService(OfflinePlugin);
+    const extras = { actionId: 5, viewType: "form", timeStamp: Date.now() };
+    const draft = offline.scheduleORM("res.partner", "web_save", [[], { name: "Draft" }], {}, { extras });
+    offline.scheduleORM("res.partner", "web_save", [[], { name: "Follow-up edit" }], {}, { id: draft, extras });
+    await offline._syncORM();
+    const [edit] = await offline._queue.list();
+    expect(edit.state).toBe("needs_attention");
+    expect(edit.resolvedResId).toBe(47);
+
+    patchWithCleanup(getService("action"), {
+        async doAction(action, options) {
+            expect.step([action, options.viewType, options.props.resId, options.props.offlineId]);
+        },
+    });
+    await contains(".o_offline_systray").click();
+    await contains(".o_offline_pending_item button:contains(Open)").click();
+    expect.verifySteps([[5, "form", 47, edit.key]]);
+});
+
+test("Open resolves a queued edit's local ID after its create syncs", async () => {
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        if (!params.refs.length) {
+            return [{ id: 47 }];
+        }
+        return new Response(JSON.stringify({ error: {
+            code: 200, data: { name: "odoo.exceptions.ValidationError", message: "Check the name." },
+        } }));
+    });
+    await mountWithCleanup(WebClient);
+    await runAllTimers();
+    const offline = getService(OfflinePlugin);
+    const key = window.crypto.randomUUID();
+    const createdId = offlineRecordId(key);
+    const extras = { actionId: 5, viewType: "form" };
+    const target = { model: "res.partner", ids: [createdId] };
+    offline.scheduleORM("res.partner", "web_save", [[], { name: "Draft" }], {}, {
+        key, createdId, extras, target,
+    });
+    offline.scheduleORM("res.partner", "web_save", [[`offline:${key}`], { name: "Renamed" }], {}, {
+        refs: [key], extras, target,
+    });
+    await offline._syncORM();
+    const [edit] = offline.getPendingEntries();
+    expect(edit.state).toBe("needs_attention");
+
+    patchWithCleanup(getService("action"), {
+        async doAction(action, options) {
+            expect.step([action, options.props.resId, options.props.offlineId]);
+        },
+    });
+    await contains(".o_offline_systray").click();
+    await contains(".o_offline_pending_item button:contains(Open)").click();
+    await animationFrame();
+    expect.verifySteps([[5, 47, edit.key]]);
 });
 
 test("session expiry is announced without opening the pending-changes panel", async () => {
