@@ -22,6 +22,7 @@ class TestCrmScopedApp(HttpCase):
         self.assertEqual(response.headers['Service-Worker-Allowed'], '/scoped_app')
 
     def test_crm_scoped_worker_caches_pipeline_bundles(self):
+        self.env.ref('base.user_admin').tour_enabled = False
         self.browser_js('/scoped_app/crm', """
             (async () => {
                 const { serviceWorker } = navigator;
@@ -68,4 +69,4 @@ class TestCrmScopedApp(HttpCase):
                 }
                 console.log('test successful');
             })().catch(console.error);
-        """, ready="odoo.isReady && document.querySelector('.o_opportunity_kanban')", login='admin')
+        """, ready="odoo.isReady && !!document.querySelector('.o_opportunity_kanban')", login='admin')

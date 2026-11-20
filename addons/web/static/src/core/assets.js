@@ -118,7 +118,7 @@ export const assets = {
         for (const [key, value] of Object.entries(session.bundle_params || {})) {
             url.searchParams.set(key, value);
         }
-        if (session.uid && session.registry_hash) {
+        if (session.db && session.registry_hash) {
             // Keep offline bundle descriptors tied to the database and registry that loaded them.
             url.searchParams.set("registry_hash", session.registry_hash);
         }
