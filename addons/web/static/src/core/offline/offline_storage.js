@@ -159,13 +159,14 @@ export function clearLegacyReadStores() {
     ]));
 }
 
-// No version check: reading the old database must not erase an unclaimed queue.
-export function withLegacyQueue(callback) {
+// The old queue is shared by all database tabs on this origin. Its version marker
+// does not identify the author of individual rows. Preserve them without replay.
+export function quarantineLegacyQueue() {
     return navigator.locks.request(LEGACY_LOCK, async () => {
         const legacy = new IndexedDB("offline", undefined, { durability: "strict" });
         const rows = (await legacy.getAllEntries(LEGACY_ENTRIES)) || [];
         if (!rows.length) {
-            return callback([], legacy, LEGACY_ENTRIES);
+            return 0;
         }
         let key = await legacy.read(KEYS, LEGACY_KEY);
         if (!key) {
@@ -174,16 +175,12 @@ export function withLegacyQueue(callback) {
             await legacy.write(KEYS, LEGACY_KEY, key);
         }
         const crypto = new Crypto(key);
-        const entries = [];
         for (const row of rows) {
-            let stored = row.value;
-            if (typeof stored === "string") {
-                const old = JSON.parse(stored);
-                stored = { payload: await crypto.encrypt(old.value || old), claim: old.claim };
-                await legacy.write(LEGACY_ENTRIES, row.key, stored);
+            if (typeof row.value === "string") {
+                const payload = await crypto.encrypt(row.value);
+                await legacy.write(LEGACY_ENTRIES, row.key, { payload });
             }
-            entries.push({ key: row.key, ...stored, crypto });
         }
-        return callback(entries, legacy, LEGACY_ENTRIES);
+        return rows.length;
     });
 }

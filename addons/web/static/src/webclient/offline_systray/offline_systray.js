@@ -221,11 +221,18 @@ class OfflineSystray extends Component {
         return "text-bg-300";
     }
 
+    get legacyNotice() {
+        const count = this.offlinePlugin.getLegacyPendingCount();
+        return count === 1
+            ? _t("One change saved on this device before the update can't be sent from this account.")
+            : _t("%s changes saved on this device before the update can't be sent from this account.", count);
+    }
+
     get labelIcon() {
         if (this.offlinePlugin.syncingORM()) {
             return "spinner-border";
         }
-        if (this.inError()) {
+        if (this.inError() || this.offlinePlugin.getLegacyPendingCount()) {
             return "error";
         }
         if (this.offlinePlugin.isOffline()) {
@@ -244,7 +251,7 @@ class OfflineSystray extends Component {
         if (this.offlinePlugin.isOffline()) {
             return _t("Working offline");
         }
-        if (this.inError()) {
+        if (this.inError() || this.offlinePlugin.getLegacyPendingCount()) {
             return _t("Sync issues");
         }
         return _t("Syncing");
@@ -257,18 +264,6 @@ class OfflineSystray extends Component {
             confirmLabel: _t("Discard"),
             cancelLabel: _t("No, keep it"),
             confirm: () => this.offlinePlugin.discardPendingChange(id),
-            cancel: () => {},
-        });
-    }
-
-    resolveLegacyChanges(send) {
-        this.dialogService.add(ConfirmationDialog, {
-            title: _t("Changes from before the update"),
-            body: send
-                ? _t("Confirm that these older changes are yours before sending them as your user.")
-                : _t("Do you want to discard the changes from before the update?"),
-            confirmLabel: send ? _t("Send my changes") : _t("Discard"),
-            confirm: () => this.offlinePlugin.resolveLegacyChanges(send),
             cancel: () => {},
         });
     }
