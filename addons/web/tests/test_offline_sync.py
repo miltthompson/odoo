@@ -9,6 +9,7 @@ from odoo import SUPERUSER_ID, api, fields
 from odoo.exceptions import AccessError
 from odoo.http.retrying import retrying
 from odoo.modules.registry import Registry
+from odoo.service.model import call_kw
 from odoo.tests import HttpCase, new_test_user, tagged
 from odoo.tests.common import BaseCase, get_db_name
 from odoo.tools import SQL, mute_logger
@@ -132,6 +133,23 @@ class TestOfflineSync(HttpCase):
         self.assertFalse(self.env['res.partner'].search([('name', '=', 'Must roll back')]))
         self.assertFalse(self.env['web.offline.operation'].search([('key', '=', key)]))
         self.assertTrue(self._send(key, steps=steps[:1])['result'])
+
+    def test_replay_keeps_the_request_cursor_under_a_savepoint(self):
+        self.authenticate(self.alice.login, self.alice.login)
+        key = str(uuid4())
+
+        def check_transaction_guard(model, method, args, kwargs):
+            transaction = model.env.cr.transaction
+            with self.assertRaisesRegex(AssertionError, 'cannot commit'):
+                with transaction.committing():
+                    self.fail('Replay must not release the request transaction')
+            return call_kw(model, method, args, kwargs)
+
+        with patch('odoo.addons.web.models.web_offline_operation.call_kw', side_effect=check_transaction_guard) as replay:
+            partner_id = self._sync(key, 'create', [{'name': 'Saved by the request'}])['result']
+            self.assertEqual(self._sync(key, 'create', [{'name': 'Saved by the request'}])['result'], partner_id)
+        replay.assert_called_once()
+        self.assertEqual(self.env['res.partner'].browse(partner_id).name, 'Saved by the request')
 
     @mute_logger('odoo.http')
     def test_regular_rpc_access_checks(self):
