@@ -1,6 +1,5 @@
 import { animationFrame, expect, press, queryAllTexts, queryOne, runAllTimers, test } from "@odoo/hoot";
 import { OfflinePlugin } from "@web/core/offline/offline_plugin";
-import { IndexedDB } from "@web/core/utils/indexed_db";
 import { WebClient } from "@web/webclient/webclient";
 import { contains, getService, mockOffline, mountWithCleanup, onRpc } from "@web/../tests/web_test_helpers";
 
@@ -36,22 +35,6 @@ test("pending changes keep send order and discard only after confirmation", asyn
     expect(offline.getPendingEntries()).toHaveLength(3);
     await contains(".modal-footer button.btn-primary").click();
     expect(offline.getPendingEntries()).toHaveLength(2);
-});
-
-test("quarantined changes show a count without details or actions", async () => {
-    const legacy = new IndexedDB("offline", "old-module-version");
-    await legacy.write("orm-to-sync", "old", JSON.stringify({
-        model: "res.partner", method: "write", args: [[1], { name: "Hidden name" }], kwargs: {},
-    }));
-    await mountWithCleanup(WebClient);
-    await getService(OfflinePlugin).getQueueReady();
-    await animationFrame();
-    expect(".o_offline_pending_count").toHaveText("1");
-    await contains(".o_offline_systray").click();
-    expect(".o_offline_systray_content section").toHaveText(
-        "One change saved on this device before the update can't be sent from this account."
-    );
-    expect(".o_offline_systray_content button, .o_offline_pending_item").toHaveCount(0);
 });
 
 test("a rejected change shows its reason and can be retried", async () => {

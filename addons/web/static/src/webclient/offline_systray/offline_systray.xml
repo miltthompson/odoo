@@ -27,9 +27,6 @@
             </button>
             <t t-set-slot="content">
                 <div class="o_offline_systray_content px-2">
-                    <section t-if="this.offlinePlugin.getLegacyPendingCount()" class="p-2">
-                        <p t-out="this.legacyNotice"/>
-                    </section>
                     <p t-if="this.offlinePlugin.getQueueError()" role="alert" class="text-danger" t-out="this.offlinePlugin.getQueueError()"/>
                     <t t-foreach="this.groupEntries()" t-as="entry" t-key="entry.id">
                         <div t-if="entry.name" class="o_horizontal_separator text-uppercase fw-bolder small mb-1">
