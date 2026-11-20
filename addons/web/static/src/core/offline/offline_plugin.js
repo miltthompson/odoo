@@ -318,23 +318,38 @@ export class OfflinePlugin extends Plugin {
     // Many2X Offline
     // -------------------------------------------------------------------------
 
-    async cacheMany2XSearch(resModel, result) {
-        if (!this._crypto) {
+    async cacheMany2XSearch(resModel, result, scope) {
+        if (!this._crypto || !result.length) {
             return;
         }
         const tableName = OfflinePlugin.MANY2X_TABLE_PREFIX + resModel;
         const values = await this._encryptAndFormat(result);
-        this._idb.write(tableName, values);
+        const write = this._idb.write(tableName, values);
+        if (scope !== undefined) {
+            const scopeKey = await this._many2XScopeKey(scope);
+            await this._idb.write(
+                `${OfflinePlugin.MANY2X_TABLE_PREFIX}search:${resModel}`,
+                values.map(({ key, value }) => ({
+                    key: `${scopeKey}:${String(key).padStart(16, "0")}`,
+                    value,
+                }))
+            );
+        }
+        await write;
     }
 
-    async searchMany2XRecords(resModel, name) {
-        if (!this._crypto) {
+    async searchMany2XRecords(resModel, name, scope) {
+        if (!this._crypto || scope === undefined) {
             return [];
         }
 
         const query = normalize(name);
         const labels = new Map();
-        const tableName = OfflinePlugin.MANY2X_TABLE_PREFIX + resModel;
+        const tableName = `${OfflinePlugin.MANY2X_TABLE_PREFIX}search:${resModel}`;
+        const scopeKey = await this._many2XScopeKey(scope);
+        const prefix = `${scopeKey}:`;
+        // Match only keys starting with the scope followed by ':'.
+        const keyRange = IDBKeyRange.bound(prefix, `${scopeKey};`, false, true);
         const results = await this._idb.search(tableName, async (value) => {
             try {
                 const label = await this._crypto.decrypt(value);
@@ -346,11 +361,17 @@ export class OfflinePlugin extends Plugin {
                 // A saved entry encrypted with a previous key is not available.
             }
             return false;
-        }, 8, MANY2X_SCAN_LIMIT);
+        }, 8, MANY2X_SCAN_LIMIT, keyRange);
         return (results || []).map(({ key, value }) => ({
-            id: Number(key),
+            id: Number(key.slice(prefix.length)),
             display_name: labels.get(value),
         }));
+    }
+
+    async _many2XScopeKey(scope) {
+        // Keep field domains and context out of plaintext IndexedDB keys.
+        const digest = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(scope));
+        return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
     }
 
     async readMany2XRecords(resModel, resIds) {

@@ -92,23 +92,21 @@ export function mockIndexedDBFactory(name, { fn }) {
                 });
             }
 
-            async search(table, searchFcn, count = 8) {
+            async search(table, searchFcn, count = 8, scanLimit = Infinity, keyRange = null) {
                 return this.mutex.exec(async () => {
                     const targetTable = this.mockIndexedDB[table];
                     if (!targetTable) {
                         return [];
                     }
-                    if (!searchFcn) {
-                        return Object.entries(dbs[this.name][table] || {})
-                            .slice(0, count)
-                            .map(([key, value]) => ({
-                                key,
-                                value,
-                            }));
-                    }
+                    const entries = Object.entries(targetTable);
+                    const candidates = keyRange
+                        ? entries.filter(([key]) => keyRange.includes(key)).sort(([a], [b]) =>
+                            indexedDB.cmp(a, b)
+                        )
+                        : entries;
                     const results = [];
-                    for (const [key, value] of Object.entries(targetTable)) {
-                        if (await searchFcn(value)) {
+                    for (const [key, value] of candidates.slice(0, scanLimit)) {
+                        if (!searchFcn || (await searchFcn(value))) {
                             results.push({ key, value });
                             if (results.length === count) {
                                 break;

@@ -1,4 +1,5 @@
 import {
+    advanceTime,
     animationFrame,
     clear,
     click,
@@ -21141,9 +21142,55 @@ test("offline text search filters the saved page without a new read", async () =
     }
     await contains(".o_offline_record_search").edit("BLIP", { confirm: false });
     expect(queryAllTexts(".o_list_char")).toEqual(["blip", "blip"]);
+    await selectAllRecords();
+    expect(".o_selection_box").toHaveText(/2\s+selected/);
+    expect(".o_select_domain").toHaveCount(0);
+    await contains(".o_unselect_all").click();
+    if (isSmall() && !queryFirst(".o_offline_record_search")) {
+        await contains('button[aria-label="Toggle offline search bar"]').click();
+    }
     await contains(".o_offline_record_search").edit("", { confirm: false });
     expect(queryAllTexts(".o_list_char")).toEqual(["yop", "blip", "gnap", "blip"]);
+    expect(".o_data_row_selected").toHaveCount(0);
     expect.verifySteps([]);
+});
+
+test.tags("desktop");
+test("a slow list refresh preserves an inline edit made on the saved page", async () => {
+    let model;
+    let response;
+    patchWithCleanup(ListController.prototype, {
+        setup() {
+            super.setup();
+            model = this.model;
+        },
+    });
+    onRpc("web_search_read", async ({ parent }) => {
+        if (response) {
+            await response.promise;
+            const result = await parent();
+            result.records[0].foo = "server value";
+            expect.step("server value returned");
+            return result;
+        }
+    });
+    await mountView({
+        resModel: "foo",
+        type: "list",
+        arch: `<list editable="bottom"><field name="foo"/></list>`,
+    });
+    response = Promise.withResolvers();
+    const load = model.load();
+    await advanceTime(600);
+    await load;
+    await contains(".o_data_cell[name='foo']").click();
+    const editor = ".o_selected_row [name='foo'] input";
+    await contains(editor).edit("unsaved edit", { confirm: false });
+    response.resolve();
+    await expect.waitForSteps(["server value returned"]);
+    await animationFrame();
+    expect(editor).toHaveValue("unsaved edit");
+    expect(".o_offline_freshness").toHaveText(/Saved on this device/);
 });
 
 test.tags("desktop");
