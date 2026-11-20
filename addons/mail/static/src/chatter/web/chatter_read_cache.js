@@ -109,7 +109,7 @@ function projectRecords(payload, rootModel, ids) {
     return data;
 }
 
-function mergeRecords(oldData, newData) {
+function mergeRecords(oldData, newData, messageIds) {
     const merged = { ...oldData };
     for (const [model, records] of Object.entries(newData)) {
         const byId = new Map((oldData[model] ?? []).map((record) => [record.id, record]));
@@ -117,6 +117,10 @@ function mergeRecords(oldData, newData) {
             byId.set(record.id, { ...byId.get(record.id), ...record });
         }
         merged[model] = [...byId.values()];
+    }
+    if (messageIds) {
+        const visible = new Set(messageIds);
+        merged["mail.message"] = (merged["mail.message"] ?? []).filter(({ id }) => visible.has(id));
     }
     return merged;
 }
@@ -193,6 +197,8 @@ class ChatterReadCache {
                 }
                 const records = messages.data["mail.message"] ?? [];
                 if (body === undefined) {
+                    // The online thread may still paginate from the deleted message placeholder.
+                    messages.oldestCursor ??= messages.ids[0];
                     messages.ids = messages.ids.filter((id) => id !== messageId);
                     messages.data["mail.message"] = records.filter(({ id }) => id !== messageId);
                 } else {
@@ -291,18 +297,32 @@ class ChatterReadCache {
 
     captureMessages(snapshot, { before, after, limit } = {}, ids, page, savedAt) {
         const previous = snapshot.messages;
-        if (before != null && before === previous?.ids[0]) {
+        const oldestCursor = previous?.oldestCursor ?? previous?.ids[0];
+        if (
+            before != null &&
+            oldestCursor != null &&
+            before >= oldestCursor &&
+            before <= (previous.ids.at(-1) ?? oldestCursor)
+        ) {
+            // The cursor lies inside the saved window. The response owns the range below it,
+            // down to the oldest returned message (or all older history on a short page).
+            const pageStart = ids.at(-1) ?? before;
+            const fullPage = ids.length > 0 && ids.length >= limit;
+            const olderIds = fullPage ? previous.ids.filter((id) => id < pageStart) : [];
+            const newerIds = previous.ids.filter((id) => id >= before);
+            const mergedIds = [...olderIds, ...[...ids].reverse(), ...newerIds];
             snapshot.messages = {
-                ids: [...new Set([...ids].reverse().concat(previous.ids))],
-                data: mergeRecords(previous.data, page),
-                hasOlder: ids.length >= limit,
+                ids: mergedIds,
+                data: mergeRecords(previous.data, page, mergedIds),
+                oldestCursor: fullPage ? Math.min(pageStart, oldestCursor) : pageStart,
+                hasOlder: fullPage && (pageStart < oldestCursor || previous.hasOlder),
                 savedAt,
             };
         } else if (after != null && after === previous?.ids.at(-1)) {
             snapshot.messages = {
+                ...previous,
                 ids: [...new Set(previous.ids.concat([...ids].reverse()))],
                 data: mergeRecords(previous.data, page),
-                hasOlder: previous.hasOlder,
                 savedAt,
             };
         } else if (before == null && after == null) {
@@ -313,10 +333,12 @@ class ChatterReadCache {
                 // including any messages removed since the previous fetch.
                 const keptIds = previous.ids.filter((id) => id < latestIds[0]);
                 const mergedIds = [...keptIds, ...latestIds];
-                const data = mergeRecords(previous.data, page);
-                const visible = new Set(mergedIds);
-                data["mail.message"] = (data["mail.message"] ?? []).filter(({ id }) => visible.has(id));
-                snapshot.messages = { ids: mergedIds, data, hasOlder: previous.hasOlder, savedAt };
+                snapshot.messages = {
+                    ...previous,
+                    ids: mergedIds,
+                    data: mergeRecords(previous.data, page, mergedIds),
+                    savedAt,
+                };
             } else {
                 snapshot.messages = { ids: latestIds, data: page, hasOlder, savedAt };
             }

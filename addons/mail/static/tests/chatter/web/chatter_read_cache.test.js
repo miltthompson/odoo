@@ -121,6 +121,36 @@ test("offline chatter retains contiguous history and isolates users and companie
     expect(snapshot).toBe(undefined);
 });
 
+test("loading an older page again refreshes saved notes without losing surrounding history", async () => {
+    const cache = getChatterReadCache();
+    await cache.capture([historyRequest(42)], historyResponse(42, [10, 9]), user.context);
+    await cache.capture([historyRequest(42, { before: 9 })], historyResponse(42, [8, 7]), user.context);
+    await cache.capture([historyRequest(42, { before: 7 })], historyResponse(42, [6, 5]), user.context);
+
+    const refreshed = historyResponse(42, [7, 6]);
+    refreshed["mail.message"][0].body = ["markup", "<p>Edited note</p>"];
+    await cache.capture([historyRequest(42, { before: 9 })], refreshed, user.context);
+
+    const { messages } = await cache.read(MODEL, 42);
+    expect(messages.ids).toEqual([5, 6, 7, 9, 10]);
+    const rows = messages.data["mail.message"];
+    expect(rows.find(({ id }) => id === 7).body).toEqual(["markup", "<p>Edited note</p>"]);
+    expect(rows.some(({ id }) => id === 8)).toBe(false);
+    expect(messages.hasOlder).toBe(true);
+});
+
+test("an older page can extend the saved history using a deleted message as its cursor", async () => {
+    const cache = getChatterReadCache();
+    await cache.capture([historyRequest(42)], historyResponse(42, [10, 9]), user.context);
+    await cache.updateMessage(MODEL, 42, 9);
+    await cache.capture([historyRequest(42, { before: 9 })], historyResponse(42, [8]), user.context);
+
+    const { messages } = await cache.read(MODEL, 42);
+    expect(messages.ids).toEqual([8, 10]);
+    expect(messages.data["mail.message"].some(({ id }) => id === 9)).toBe(false);
+    expect(messages.hasOlder).toBe(false);
+});
+
 test("offline chatter restores notes and activities with explained unavailable controls", async () => {
     const pyEnv = await startServer();
     const id = pyEnv[MODEL].create({ name: "Saved contact" });
