@@ -9,8 +9,7 @@ from urllib.parse import urlsplit
 
 from odoo.tests import HttpCase
 from odoo.tests.browser_network import BrowserNetworkRelay
-from odoo.tests.case import TestCase
-from odoo.tests.common import ChromeBrowser, HOST
+from odoo.tests.common import BaseCase, ChromeBrowser, HOST
 
 
 class _EchoHandler(BaseHTTPRequestHandler):
@@ -29,7 +28,7 @@ class _EchoHandler(BaseHTTPRequestHandler):
         pass
 
 
-class TestBrowserNetworkRelay(TestCase):
+class TestBrowserNetworkRelay(BaseCase):
     def test_relay_modes(self):
         with ThreadingHTTPServer((HOST, 0), _EchoHandler) as upstream:
             upstream.received = []

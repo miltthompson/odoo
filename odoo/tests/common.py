@@ -2025,6 +2025,7 @@ class ChromeBrowser:
 
     def stop_service_workers(self):
         """Stop running service workers without unregistering or clearing their caches."""
+        self._websocket_request('ServiceWorker.enable')
         self._websocket_request('ServiceWorker.stopAllWorkers')
 
     def _websocket_send(self, method, *, params=None, with_future=False):
