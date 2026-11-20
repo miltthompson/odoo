@@ -12,6 +12,7 @@ import { mockDate } from "@odoo/hoot-mock";
 
 import { getService, mockOffline, serverState } from "@web/../tests/web_test_helpers";
 import { user } from "@web/core/user";
+import { Mutex } from "@web/core/utils/concurrency";
 import { patch } from "@web/core/utils/patch";
 import { session } from "@web/session";
 
@@ -45,6 +46,16 @@ beforeEach(() => {
     mockDate("2026-11-20 12:00:00");
     // HOOT resets the contents of its IndexedDB mock after each test.
     patch(session, { registry_hash: `chatter-test-${++cacheVersion}` });
+    // HOOT's default Web Locks mock does not serialize requests or return their results.
+    const locks = new Map();
+    patch(navigator.locks, {
+        request(name, callback) {
+            if (!locks.has(name)) {
+                locks.set(name, new Mutex());
+            }
+            return locks.get(name).exec(callback);
+        },
+    });
     patch(window.crypto.subtle, {
         // HOOT already mocks encryption; preserve distinct inputs for cache-key assertions.
         async digest(_algorithm, input) {
@@ -58,8 +69,9 @@ test("offline chatter retains contiguous history and isolates users and companie
     await cache.capture([historyRequest(42)], historyResponse(42, [9, 8]), user.context);
     await cache.capture([historyRequest(42, { before: 8 })], historyResponse(42, [7, 6]), user.context);
     await cache.capture([historyRequest(42, { before: 2 })], historyResponse(42, [1]), user.context);
+    await cache.capture([historyRequest(42)], historyResponse(42, [10, 9]), user.context);
     let snapshot = await cache.read(MODEL, 42);
-    expect(snapshot.messages.ids).toEqual([6, 7, 8, 9]);
+    expect(snapshot.messages.ids).toEqual([6, 7, 8, 9, 10]);
     expect(snapshot.messages.hasOlder).toBe(true);
     expect(snapshot.messages.data["res.partner"]).toEqual([{ id: 1, name: "Author" }]);
     expect(snapshot.messages.data["ir.attachment"]).toBe(undefined);
@@ -83,20 +95,40 @@ test("offline chatter retains contiguous history and isolates users and companie
     expect(await getChatterReadCache().read(MODEL, 42)).toBe(undefined);
     userId = serverState.userId;
 
-    await getChatterReadCache().capture(
+    // Two instances share the same database and must not overwrite each other's updates.
+    const secondCache = getChatterReadCache();
+    expect(secondCache === cache).toBe(false);
+    await Promise.all([
+        cache.capture(
+            [historyRequest(42, { before: 6 })], historyResponse(42, [5, 4]), user.context
+        ),
+        secondCache.capture(
+            [detailsRequest(42)],
+            { "mail.thread": [{ model: MODEL, id: 42, hasReadAccess: true, activities: [] }] },
+            user.context
+        ),
+    ]);
+    snapshot = await cache.read(MODEL, 42);
+    expect(snapshot.messages.ids).toEqual([4, 5, 6, 7, 8, 9, 10]);
+    expect(snapshot.activities.data["mail.thread"][0].activities).toEqual([]);
+
+    await secondCache.capture(
         [detailsRequest(42)],
         { "mail.thread": [{ model: MODEL, id: 42, hasReadAccess: false }] },
         user.context
     );
-    snapshot = await getChatterReadCache().read(MODEL, 42);
+    snapshot = await cache.read(MODEL, 42);
     expect(snapshot).toBe(undefined);
 });
 
 test("offline chatter restores notes and activities with explained unavailable controls", async () => {
     const pyEnv = await startServer();
     const id = pyEnv[MODEL].create({ name: "Saved contact" });
-    pyEnv["mail.message"].create({ body: "Quote sent", model: MODEL, res_id: id });
-    pyEnv["mail.message"].create({ body: "Internal note about the quote", model: MODEL, res_id: id });
+    const [removedId, editedId, noteId] = pyEnv["mail.message"].create([
+        { body: "Draft quote", model: MODEL, res_id: id },
+        { body: "Quote sent", model: MODEL, res_id: id },
+        { body: "Internal note about the quote", model: MODEL, res_id: id },
+    ]);
     pyEnv["mail.activity"].create({
         summary: "Call about the quote",
         date_deadline: "2026-11-20",
@@ -125,7 +157,25 @@ test("offline chatter restores notes and activities with explained unavailable c
     const saved = await captured.promise;
     expect(saved?.activities?.savedAt).toBeGreaterThan(openedAt);
     expect(saved?.messages?.savedAt).toBeGreaterThan(openedAt);
-    const thread = getService("mail.store")["mail.thread"].get({ model: MODEL, id });
+    const store = getService("mail.store");
+    const thread = store["mail.thread"].get({ model: MODEL, id });
+    const updateRecorded = Promise.withResolvers();
+    patch(cache, {
+        async updateMessage(_model, _id, messageId) {
+            await super.updateMessage(...arguments);
+            if (messageId === removedId) {
+                updateRecorded.resolve();
+            }
+        },
+    });
+    await store["mail.message"].get(editedId).edit("Quote accepted");
+    await store["mail.message"].get(removedId).remove({ removeFromThread: true });
+    await updateRecorded.promise;
+    const updated = await cache.read(MODEL, id);
+    expect(updated.messages.ids).toEqual([editedId, noteId]);
+    expect(updated.messages.data["mail.message"].find(({ id }) => id === editedId).body[1]).toInclude(
+        "Quote accepted"
+    );
     // Simulate re-opening in a fresh mail store without relying on the warm in-memory thread.
     thread.hasLoadedChatterActivities = false;
     thread.messages = [];
@@ -133,11 +183,20 @@ test("offline chatter restores notes and activities with explained unavailable c
     thread.isLoaded = false;
 
     await setOffline(true);
-    await contains(".o-mail-Message", { text: "Quote sent" });
+    await contains(".o-mail-Message-content:text('Quote accepted (edited)')");
+    await contains(".o-mail-Message", { text: "Draft quote", count: 0 });
     await contains(".o-mail-Message", { text: "Internal note about the quote" });
     await contains(".o-mail-Activity", { text: "Call about the quote" });
     await contains(".o-mail-Chatter-savedAt", { text: "Saved on this device · updated now" });
     await contains(".o-mail-Chatter-sendMessage:disabled");
     await contains(".o-mail-Followers-button:disabled");
     await contains(".o-mail-Chatter-attachFiles:disabled");
+
+    pyEnv["mail.message"].create(Array.from({ length: store.FETCH_LIMIT + 2 }, (_, index) => ({
+        body: `New message ${index}`,
+        model: MODEL,
+        res_id: id,
+    })));
+    await setOffline(false);
+    await contains(".o-mail-Message", { text: `New message ${store.FETCH_LIMIT + 1}` });
 });

@@ -11,6 +11,7 @@ const pendingRestores = new WeakMap();
 const threadPatch = {
     chatterSavedAt: undefined,
     hasOfflineChatterSnapshot: false,
+    hasRestoredOfflineMessages: false,
     hasLoadedChatterActivities: false,
 
     isOfflineChatter() {
@@ -41,6 +42,7 @@ const threadPatch = {
                 const saved = messages.ids.map((id) => this.store["mail.message"].get(id));
                 this.messages.unshift(...saved.filter(Boolean));
                 this.loadOlder = messages.hasOlder;
+                this.hasRestoredOfflineMessages = true;
             }
             this.status = "ready";
             this.isLoaded = true;
@@ -73,6 +75,7 @@ const threadPatch = {
         }
         if (this.hasOfflineChatterSnapshot && this.hasReadAccess === false) {
             this.messages = [];
+            this.hasRestoredOfflineMessages = false;
             this.activities = [];
             this.loadOlder = false;
             this.status = "ready";
@@ -90,10 +93,19 @@ const threadPatch = {
         if (this.isOfflineChatter()) {
             return this.restoreOfflineChatter();
         }
+        const replacesSavedHistory = this.hasRestoredOfflineMessages && this.status !== "loading";
         await super.fetchNewMessages(...arguments);
         if (this.hasLoadingFailedError instanceof ConnectionLostError && this.isOfflineChatter()) {
             return this.restoreOfflineChatter();
         }
+        if (replacesSavedHistory && !this.hasLoadingFailed) {
+            this.hasRestoredOfflineMessages = false;
+        }
+    },
+
+    getFetchNewMessagesAfter() {
+        // A saved cursor might be several pages behind. Refresh the latest page on reconnect.
+        return this.hasRestoredOfflineMessages ? undefined : super.getFetchNewMessagesAfter();
     },
 
     async fetchMoreMessages() {

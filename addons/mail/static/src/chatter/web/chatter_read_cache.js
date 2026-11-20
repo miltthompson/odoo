@@ -125,9 +125,15 @@ class ChatterReadCache {
     constructor(scope, version, secret) {
         this.scope = scope;
         this.version = version;
-        this.db = new IndexedDB(`mail.chatter:${scope}`, version);
+        this.name = `mail.chatter:${scope}`;
+        this.db = new IndexedDB(this.name, version);
         this.crypto = new Crypto(secret);
         this.mutex = new Mutex();
+    }
+
+    withLock(callback) {
+        // The snapshot is shared across tabs. Lock the whole read/modify/write, including clear().
+        return navigator.locks?.request(this.name, callback) ?? this.mutex.exec(callback);
     }
 
     async key(model, id, context = user.context) {
@@ -150,7 +156,7 @@ class ChatterReadCache {
     async read(model, id) {
         try {
             const key = await this.key(model, id);
-            return await this.mutex.exec(() => this.readByKey(key));
+            return await this.withLock(() => this.readByKey(key));
         } catch {
             // Unavailable storage or a rotated secret must behave like an empty cache.
         }
@@ -160,7 +166,7 @@ class ChatterReadCache {
     async invalidate(model, id) {
         try {
             const key = await this.key(model, id);
-            await this.mutex.exec(() => this.db.delete(TABLE, key));
+            await this.withLock(() => this.db.delete(TABLE, key));
         } catch {
             // Browser persistence is best effort.
         }
@@ -169,9 +175,49 @@ class ChatterReadCache {
     /** Clear saved chatter for the current user in all company contexts. */
     async clear() {
         try {
-            await this.mutex.exec(() => this.db.deleteDatabase());
+            await this.withLock(() => this.db.deleteDatabase());
         } catch {
             // Browser persistence is best effort.
+        }
+    }
+
+    /** Keep an edited or removed message consistent with a page already saved on the device. */
+    async updateMessage(model, id, messageId, body) {
+        try {
+            const key = await this.key(model, id);
+            await this.withLock(async () => {
+                const snapshot = await this.readByKey(key);
+                const messages = snapshot?.messages;
+                if (!messages?.ids.includes(messageId)) {
+                    return;
+                }
+                const records = messages.data["mail.message"] ?? [];
+                if (body === undefined) {
+                    messages.ids = messages.ids.filter((id) => id !== messageId);
+                    messages.data["mail.message"] = records.filter(({ id }) => id !== messageId);
+                } else {
+                    const message = records.find(({ id }) => id === messageId);
+                    if (!message) {
+                        return;
+                    }
+                    message.body = ["markup", body];
+                }
+                const savedAt = Math.max(snapshot.activities?.savedAt ?? 0, messages.savedAt);
+                await this.writeSnapshot(key, snapshot, savedAt);
+            });
+        } catch {
+            // Browser persistence is best effort; the server accepted the change.
+        }
+    }
+
+    async writeSnapshot(key, snapshot, savedAt) {
+        const data = await this.crypto.encrypt(snapshot);
+        try {
+            await this.db.write(TABLE, key, { data, savedAt });
+        } catch (error) {
+            if (error instanceof IDBQuotaExceededError) {
+                await this.db.deleteDatabase();
+            }
         }
     }
 
@@ -223,7 +269,7 @@ class ChatterReadCache {
             }
             const key = await this.key(model, id, context);
             const savedAt = Date.now();
-            return this.mutex.exec(async () => {
+            return this.withLock(async () => {
                 if (denied) {
                     await this.db.delete(TABLE, key);
                     return;
@@ -237,14 +283,7 @@ class ChatterReadCache {
                     changed = this.captureMessages(snapshot, params, ids, data, savedAt) || changed;
                 }
                 if (changed) {
-                    const data = await this.crypto.encrypt(snapshot);
-                    try {
-                        await this.db.write(TABLE, key, { data, savedAt });
-                    } catch (error) {
-                        if (error instanceof IDBQuotaExceededError) {
-                            await this.db.deleteDatabase();
-                        }
-                    }
+                    await this.writeSnapshot(key, snapshot, savedAt);
                 }
             });
         }));
@@ -267,9 +306,20 @@ class ChatterReadCache {
                 savedAt,
             };
         } else if (before == null && after == null) {
-            snapshot.messages = {
-                ids: [...ids].reverse(), data: page, hasOlder: ids.length >= limit, savedAt,
-            };
+            const latestIds = [...ids].reverse();
+            const hasOlder = ids.length >= limit;
+            if (hasOlder && previous?.ids.includes(latestIds[0])) {
+                // The shared boundary proves continuity. The new page owns the range it covers,
+                // including any messages removed since the previous fetch.
+                const keptIds = previous.ids.filter((id) => id < latestIds[0]);
+                const mergedIds = [...keptIds, ...latestIds];
+                const data = mergeRecords(previous.data, page);
+                const visible = new Set(mergedIds);
+                data["mail.message"] = (data["mail.message"] ?? []).filter(({ id }) => visible.has(id));
+                snapshot.messages = { ids: mergedIds, data, hasOlder: previous.hasOlder, savedAt };
+            } else {
+                snapshot.messages = { ids: latestIds, data: page, hasOlder, savedAt };
+            }
         } else {
             // Don't join an arbitrary jump to a saved window: it can leave gaps in history.
             return false;
