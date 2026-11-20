@@ -7,6 +7,7 @@ import { router } from "@web/core/browser/router";
 import { browser } from "../../core/browser/browser";
 import { registry } from "../../core/registry";
 import { post } from "@web/core/network/http_service";
+import { rpcBus } from "@web/core/network/rpc";
 import { redirect } from "@web/core/utils/urls";
 import { useService } from "@web/core/utils/hooks";
 import { ORM } from "@web/core/orm_plugin";
@@ -123,6 +124,7 @@ function logOutItem() {
         callback: async () => {
             browser.navigator.serviceWorker?.controller?.postMessage("user_logout");
             const url = await post(route, { csrf_token: odoo.csrf_token }, "url");
+            rpcBus.trigger("WEBCLIENT:LOGOUT");
             redirect(url);
         },
         sequence: 70,

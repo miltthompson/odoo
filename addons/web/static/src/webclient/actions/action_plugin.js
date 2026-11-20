@@ -397,9 +397,10 @@ export function useActionManager(router = _router) {
      * @private
      * @param {ActionRequest} actionRequest
      * @param {Context} [context={}]
+     * @param {{ silent?: boolean }} [options]
      * @returns {Promise<Action>}
      */
-    async function _loadAction(actionRequest, context = {}) {
+    async function _loadAction(actionRequest, context = {}, { silent } = {}) {
         if (typeof actionRequest === "string" && actionRegistry.contains(actionRequest)) {
             // actionRequest is a key in the actionRegistry
             return {
@@ -419,7 +420,7 @@ export function useActionManager(router = _router) {
                     action_id: actionRequest,
                     context: ctx,
                 },
-                { cache: { type: "disk" } }
+                { cache: { type: "disk" }, ...(silent && { silent }) }
             );
             if (action.help) {
                 action.help = markup(action.help);
@@ -1965,8 +1966,8 @@ export function useActionManager(router = _router) {
         switchView,
         restore,
         loadState,
-        async loadAction(actionRequest, context) {
-            const action = await _loadAction(actionRequest, context);
+        async loadAction(actionRequest, context, options) {
+            const action = await _loadAction(actionRequest, context, options);
             return _preprocessAction(action, context);
         },
         get currentController() {

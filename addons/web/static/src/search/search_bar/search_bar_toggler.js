@@ -3,12 +3,10 @@ import {
     onMounted,
     onWillStart,
     onWillUnmount,
-    usePlugin,
     proxy,
     t,
     useProps,
 } from "@odoo/owl";
-import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { browser } from "@web/core/browser/browser";
 import { useService } from "@web/core/utils/hooks";
 import { useDebounced } from "@web/core/utils/timing";
@@ -26,11 +24,9 @@ export class SearchBarToggler extends Component {
 export class OfflineSearchBarToggler extends SearchBarToggler {
     static template = "web.SearchBar.Toggler.Offline";
     setup() {
-        const offlinePlugin = usePlugin(OfflinePlugin);
         onWillStart(async () => {
-            const { actionId, viewType } = this.env.config;
-            const availableSearches = await offlinePlugin.getAvailableSearches(actionId, viewType);
-            this.isDisabled = Object.keys(availableSearches).length <= 1;
+            const availableSearches = await this.env.searchModel.getAvailableOfflineSearches();
+            this.isDisabled = availableSearches.length <= 1;
         });
     }
 }

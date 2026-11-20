@@ -1,8 +1,11 @@
 import { usePlugin } from "@odoo/owl";
 import { DebugModePlugin } from "@web/core/debug_mode_plugin";
 import { rpcBus } from "@web/core/network/rpc";
+import { isRPCCacheDisabled } from "@web/core/network/rpc_cache";
+import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { UPDATE_METHODS } from "@web/core/orm_plugin";
 import { registry } from "@web/core/registry";
+import { session } from "@web/session";
 
 /**
  * @typedef {Object} IrFilter
@@ -44,9 +47,10 @@ import { registry } from "@web/core/registry";
 
 export const viewService = {
     dependencies: ["orm", "ui"],
-    async: ["loadViews"],
+    async: ["loadViews", "prefetchViews"],
     start(env, { orm, ui }) {
         const debugMode = usePlugin(DebugModePlugin);
+        const offlinePlugin = usePlugin(OfflinePlugin);
 
         rpcBus.addEventListener("RPC:RESPONSE", (ev) => {
             const { model, method } = ev.detail.data.params;
@@ -66,6 +70,47 @@ export const viewService = {
          * @returns {Promise<ViewDescriptions>}
          */
         async function loadViews(params, options = {}) {
+            const { resModel } = params;
+            const result = await requestViews(orm, params, options);
+            const viewDescriptions = {
+                fields: result.models[resModel].fields,
+                relatedModels: result.models,
+                views: {},
+            };
+            for (const viewType in result.views) {
+                const { arch, toolbar, id, filters, custom_view_id } = result.views[viewType];
+                const viewDescription = { arch, id, custom_view_id };
+                if (toolbar) {
+                    viewDescription.actionMenus = toolbar;
+                }
+                if (filters) {
+                    viewDescription.irFilters = filters;
+                }
+                viewDescriptions.views[viewType] = viewDescription;
+            }
+            return viewDescriptions;
+        }
+
+        /**
+         * Warm the normal view cache without rendering a view or reading any records.
+         * Pass the same params and options as the offline consumer's loadViews call.
+         * Schedule this after rendering; background failures do not block navigation.
+         *
+         * @param {LoadViewsParams} params
+         * @param {LoadViewsOptions} [options]
+         */
+        async function prefetchViews(params, options = {}) {
+            if (canPrefetchViews()) {
+                await requestViews(orm.silent, params, options);
+            }
+        }
+
+        function canPrefetchViews() {
+            return Boolean(window.isSecureContext && session.browser_cache_secret &&
+                !isRPCCacheDisabled() && !offlinePlugin.isOffline());
+        }
+
+        function requestViews(orm, params, options) {
             const { context, resModel, views } = params;
             const loadViewsOptions = {
                 action_id: options.actionId || false,
@@ -99,30 +144,13 @@ export const viewService = {
                 )
             );
 
-            const result = await orm.cache({ type: "disk" }).call(resModel, "get_views", [], {
+            return orm.cache({ type: "disk" }).call(resModel, "get_views", [], {
                 context: filteredContext,
                 views,
                 options: loadViewsOptions,
             });
-            const viewDescriptions = {
-                fields: result.models[resModel].fields,
-                relatedModels: result.models,
-                views: {},
-            };
-            for (const viewType in result.views) {
-                const { arch, toolbar, id, filters, custom_view_id } = result.views[viewType];
-                const viewDescription = { arch, id, custom_view_id };
-                if (toolbar) {
-                    viewDescription.actionMenus = toolbar;
-                }
-                if (filters) {
-                    viewDescription.irFilters = filters;
-                }
-                viewDescriptions.views[viewType] = viewDescription;
-            }
-            return viewDescriptions;
         }
-        return { loadViews };
+        return { canPrefetchViews, loadViews, prefetchViews };
     },
 };
 

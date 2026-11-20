@@ -454,6 +454,10 @@ export class RelationalModel extends Model {
             [],
             { ...user.context, ...getFieldBaseContext(config.context) },
         ]);
+        // A search can change while its read is in flight. Save the search that started it.
+        const search = !config.isMonoRecord && this.env.config.actionId
+            ? this.env.searchModel.getCurrentSearch()
+            : null;
         // Do not use a cached result if we're online and this isn't the first load of the model,
         // except if we're loading another record (form view) or creating a new record (onchange).
         const noCache =
@@ -465,7 +469,7 @@ export class RelationalModel extends Model {
             update: "always",
             noCache,
             callback: async (result, hasChanged) => {
-                this._setAvailableOffline(config, result);
+                this._setAvailableOffline(config, result, search);
                 const { root, loadId } = await rootLoadProm;
                 if (root.config.isMonoRecord && currentResId !== root.config.resId) {
                     // The record ID has been changed, likely because a new record was saved.
@@ -924,25 +928,25 @@ export class RelationalModel extends Model {
      * @param {RelationalModelConfig} config
      * @param {Object} result the data loaded with the given config (rpc result)
      */
-    _setAvailableOffline(config, result) {
+    _setAvailableOffline(config, result, search) {
         let { actionId, viewType } = this.env.config;
         let resId = config.resId;
-        let markAsAvailableOffline = actionId;
-        if (config.isMonoRecord && ["list", "kanban"].includes(viewType)) {
-            viewType = viewType + "_quick_create"; // list_quick_create or kanban_quick_create
-            resId = false;
+        if (!actionId) {
+            return;
         }
-        if (!config.isMonoRecord) {
+        if (config.isMonoRecord) {
+            if (["list", "kanban"].includes(viewType)) {
+                viewType += "_quick_create";
+                resId = false;
+            }
+            this.offlinePlugin.setAvailableOffline(actionId, viewType, { resId });
+        } else {
             const hasRecords = config.groupBy.length
                 ? result.groups.some((group) => group.__count > 0)
                 : result.length > 0;
-            markAsAvailableOffline = markAsAvailableOffline && hasRecords;
-        }
-        if (markAsAvailableOffline) {
-            const params = config.isMonoRecord
-                ? { resId }
-                : { search: this.env.searchModel.getCurrentSearch() };
-            this.offlinePlugin.setAvailableOffline(actionId, viewType, params);
+            if (search && (hasRecords || search.saveEmptyOffline)) {
+                this.offlinePlugin.setAvailableOffline(actionId, viewType, { search });
+            }
         }
     }
 

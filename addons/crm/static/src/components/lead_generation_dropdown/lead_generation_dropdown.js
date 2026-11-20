@@ -1,4 +1,4 @@
-import { Component, proxy } from "@odoo/owl";
+import { Component, proxy, useEffect, usePlugin } from "@odoo/owl";
 import { Dropdown } from "@web/core/dropdown/dropdown";
 import { DropdownItem } from "@web/core/dropdown/dropdown_item";
 import { useDropdownState } from "@web/core/dropdown/dropdown_hooks";
@@ -6,6 +6,7 @@ import { useService } from "@web/core/utils/hooks";
 import { useHotkey } from "@web/core/hotkeys/hotkey_hook";
 import { sprintf } from "@web/core/utils/strings";
 import { _t } from "@web/core/l10n/translation";
+import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { user } from "@web/core/user";
 import { ConfirmationDialog } from "@web/core/confirmation_dialog/confirmation_dialog";
 import { ErrorDialog } from "@web/core/errors/error_dialogs";
@@ -21,6 +22,8 @@ export const MODULE_STATUS = {
 export class LeadGenerationDropdown extends Component {
     static template = "crm.lead_generation_dropdown";
     static components = { Dropdown, DropdownItem };
+
+    offlinePlugin = usePlugin(OfflinePlugin);
 
     setup() {
         this.orm = useService("orm");
@@ -99,6 +102,11 @@ export class LeadGenerationDropdown extends Component {
             ],
         });
         this.dropdown = useDropdownState();
+        useEffect(() => {
+            if (this.offlinePlugin.isOffline()) {
+                this.dropdown.close();
+            }
+        });
         useHotkey("escape", () => this.dropdown.close(), {
             isAvailable: () => this.dropdown.isOpen,
         });
@@ -117,7 +125,15 @@ export class LeadGenerationDropdown extends Component {
         element.swappedDescription = false;
     }
 
+    offlineReason() {
+        return this.offlinePlugin.isOffline() && _t("Generating leads needs a connection.");
+    }
+
     async toggleDropdown() {
+        if (this.offlineReason()) {
+            this.offlinePlugin.explainUnavailable(this.offlineReason());
+            return;
+        }
         for (const dropdownContentElement in this.state.dropdownContentElements) {
             this.resetDescription(this.state.dropdownContentElements[dropdownContentElement]);
         }
@@ -171,8 +187,15 @@ export class LeadGenerationDropdown extends Component {
             })()
         );
 
-        await Promise.all(proms);
-        this.dropdown.open();
+        try {
+            await Promise.all(proms);
+        } catch (error) {
+            this.dropdownWasAlreadyOpened = false;
+            throw error;
+        }
+        if (!this.offlinePlugin.isOffline()) {
+            this.dropdown.open();
+        }
     }
 
     get sortedDropdownContentElements() {
@@ -180,6 +203,10 @@ export class LeadGenerationDropdown extends Component {
     }
 
     onClickAction(element) {
+        if (this.offlineReason()) {
+            this.offlinePlugin.explainUnavailable(this.offlineReason());
+            return;
+        }
         if (!element.hasAccess) {
             return this.requestAccess(
                 element.moduleName,

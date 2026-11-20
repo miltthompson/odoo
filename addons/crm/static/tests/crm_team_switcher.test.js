@@ -5,12 +5,20 @@ import {
     defineModels,
     fields,
     getService,
+    mockOffline,
     models,
+    mountView,
     mountWithCleanup,
+    onRpc,
+    patchWithCleanup,
     switchView,
 } from "@web/../tests/web_test_helpers";
 import { animationFrame } from "@odoo/hoot-mock";
 import { expect, test } from "@odoo/hoot";
+import { OfflinePlugin } from "@web/core/offline/offline_plugin";
+import { rpcBus } from "@web/core/network/rpc";
+import { user } from "@web/core/user";
+import { session } from "@web/session";
 import { WebClient } from "@web/webclient/webclient";
 
 class Users extends models.Model {
@@ -170,7 +178,12 @@ class Lead extends models.Model {
     };
 }
 
-defineModels([Users, Team, Stage, Lead]);
+class LostReasonWizard extends models.Model {
+    _name = "crm.lead.lost";
+    _views = { form: `<form/>` };
+}
+
+defineModels([Users, Team, Stage, Lead, LostReasonWizard]);
 defineMailModels();
 defineActions([
     {
@@ -186,6 +199,20 @@ defineActions([
             [false, "list"],
             [false, "form"],
         ],
+    },
+    {
+        id: 2,
+        xml_id: "crm.crm_lead_action_pipeline",
+        res_model: "crm.lead",
+        context: { show_lead_gen_button: true },
+        views: [[false, "kanban"], [false, "form"]],
+    },
+    {
+        id: 3,
+        xml_id: "crm.crm_lead_lost_action",
+        res_model: "crm.lead.lost",
+        target: "new",
+        views: [[false, "form"]],
     },
 ]);
 
@@ -222,4 +249,129 @@ test("crm team switcher rendering", async () => {
     await contains(".o_list_button_add").click();
     expect(".o_field_many2one[name='team_id'] input").toHaveValue("Hyrule");
     await contains(".o_form_button_cancel").click();
+});
+
+test.tags("desktop");
+test("offline team switcher restores the last saved team and does not offer unsaved teams", async () => {
+    expect.errors(3); // Refresh attempts for the cached team list and the two saved pipelines.
+    const setOffline = mockOffline();
+    await mountWithCleanup(WebClient);
+    const action = getService("action");
+    await action.doAction(1);
+    await contains(".o_cp_team_switcher").click();
+    await contains(".o_popover .dropdown-item:text('Mushroom Kingdom')").click();
+    expect(".o_kanban_record").toHaveCount(4);
+    await animationFrame();
+
+    await setOffline(true);
+    await getService(OfflinePlugin).getVisitedStatus();
+    await action.doAction(1, { clearBreadcrumbs: true });
+    expect(".o_cp_team_switcher").toHaveText("Mushroom Kingdom");
+    expect(".o_kanban_record").toHaveCount(4);
+    await contains(".o_cp_team_switcher").click();
+    expect(".o_popover .dropdown-item:text('Hyrule')").toHaveAttribute("aria-disabled", "true");
+    await contains(".o_popover .dropdown-item:text('All Teams')").click();
+    expect(".o_kanban_record").toHaveCount(8);
+    expect(".o_cp_team_switcher").toHaveText("All Teams");
+    expect.verifyErrors([/get_team_switcher_data/, /web_read_group/, /web_read_group/]);
+});
+
+test.tags("desktop");
+test("the CRM team preference is user-scoped and cleared on logout", async () => {
+    const currentKey = `crm.switcher_team_id:${JSON.stringify([session.db, user.userId])}`;
+    const anotherKey = `crm.switcher_team_id:${JSON.stringify([session.db, 9999])}`;
+    localStorage.setItem(anotherKey, "2");
+    await mountWithCleanup(WebClient);
+    await getService("action").doAction(1);
+    expect(".o_cp_team_switcher").toHaveText("All Teams");
+    await contains(".o_cp_team_switcher").click();
+    await contains(".o_popover .dropdown-item:text('Mushroom Kingdom')").click();
+    expect(localStorage.getItem(currentKey)).toBe("1");
+    rpcBus.trigger("WEBCLIENT:LOGOUT");
+    expect(localStorage.getItem(currentKey)).toBe(null);
+    expect(localStorage.getItem(anotherKey)).toBe("2");
+});
+
+test.tags("desktop");
+test("the pipeline warms dialog layouts only after it renders and does not generate leads offline", async () => {
+    const setOffline = mockOffline();
+    let prefetch;
+    patchWithCleanup(window, {
+        requestIdleCallback(callback) {
+            prefetch = callback;
+            return 1;
+        },
+        cancelIdleCallback() {},
+    });
+    const layouts = new Set();
+    onRpc("get_views", ({ model, kwargs }) => {
+        layouts.add(kwargs.context.form_view_ref || model);
+    });
+    await mountWithCleanup(WebClient);
+    await getService("action").doAction(2);
+    expect(".o_kanban_record").toHaveCount(8);
+    expect([...layouts]).toEqual(["crm.lead"]);
+    await prefetch();
+    expect([...layouts].sort()).toEqual(["crm.lead", "crm.lead.lost", "form", "mail.activity.schedule"]);
+    await setOffline(true);
+    expect("button:text('Generate')").toHaveAttribute("aria-disabled", "true");
+    await contains("button:text('Generate')").click();
+    expect(".o_lead_mining_menu_choices").toHaveCount(0);
+});
+
+test("prefetched view layouts are served from the normal cache while offline", async () => {
+    const setOffline = mockOffline();
+    onRpc("crm.lead", "get_views", ({ kwargs }) => {
+        expect.step(kwargs.views);
+    });
+    await mountWithCleanup(WebClient);
+    await getService("mail.store").isReadyPromise;
+    const view = getService("view");
+    const params = { resModel: "crm.lead", views: [[false, "form"]], context: {} };
+    await view.prefetchViews(params);
+    await expect.waitForSteps([[[false, "form"]]]);
+    await setOffline(true);
+    const { views } = await view.loadViews(params);
+    expect(views.form.arch).toInclude("<form");
+    await expect.waitForSteps([]);
+});
+
+test("CRM dependent-app header actions explain why they are unavailable offline", async () => {
+    const setOffline = mockOffline();
+    await mountView({
+        type: "form",
+        resModel: "crm.lead",
+        resId: 1,
+        arch: `<form>
+            <header>
+                <button name="action_set_won_rainbowman" string="Won" type="object"/>
+                <button name="action_sale_quotations_new" string="New Quotation" type="object"/>
+                <button name="2" string="SMS" type="action"/>
+            </header>
+            <sheet><field name="name"/></sheet>
+        </form>`,
+    });
+    patchWithCleanup(getService("action"), {
+        async doActionButton({ name }) {
+            expect.step(name);
+        },
+    });
+    await setOffline(true);
+    const quotation = "button[name='action_sale_quotations_new']";
+    if (getService("ui").isSmall) {
+        expect(quotation).toHaveCount(0);
+        const more = ".o_statusbar_buttons button.dropdown-toggle-split";
+        expect(more).toBeEnabled();
+        await contains(more).click();
+        expect(`.o-dropdown--menu ${quotation}`).toHaveText("New Quotation");
+    } else {
+        expect(`.o_statusbar_buttons ${quotation}`).toHaveText("New Quotation");
+    }
+    expect(quotation).toHaveAttribute("aria-disabled", "true");
+    expect(quotation).toHaveAttribute("data-tooltip", "This action needs a connection.");
+    expect("button[name='2']").toHaveAttribute("aria-disabled", "true");
+
+    await contains(quotation).click();
+    expect(".o_notification_content").toHaveText("This action needs a connection.");
+    expect.verifySteps([]);
 });
