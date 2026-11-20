@@ -25,9 +25,11 @@ import { session } from "@web/session";
 
 const IS_READY = Symbol("ready");
 const MANY2X_SCAN_LIMIT = 1000;
+const OFFLINE_NOTICE_INTERVAL = 500;
+const OFFLINE_POINTER_EVENTS = ["pointerdown", "click"];
 const GUARDED_EVENTS = [
-    "click", "auxclick", "dblclick", "keydown", "keyup", "keypress",
-    "pointerdown", "pointerup", "mousedown", "mouseup", "touchstart", "touchend", "submit",
+    "auxclick", "dblclick", "keydown", "keyup", "keypress", "pointerup",
+    "mousedown", "mouseup", "touchstart", "touchend", "submit",
 ];
 
 class FakeIndexedDB {
@@ -61,6 +63,7 @@ export class OfflinePlugin extends Plugin {
     notification = usePlugin(NotificationPlugin);
     _gatedControls = new Map();
     _offlineDescriptions = new Map();
+    _offlineNotice = null;
     orm = usePlugin(ORM);
 
     _idb = window.isSecureContext
@@ -158,6 +161,9 @@ export class OfflinePlugin extends Plugin {
             // Guard newly rendered controls too, before the observer has added their attributes.
             for (const type of GUARDED_EVENTS) {
                 window.addEventListener(type, this._onOfflineActivation, true);
+            }
+            for (const type of OFFLINE_POINTER_EVENTS) {
+                document.addEventListener(type, this._onOfflineActivation, true);
             }
             this._offlineUI();
             // Create an observer instance linked to the callback function to keep disabling
@@ -368,6 +374,11 @@ export class OfflinePlugin extends Plugin {
         for (const type of GUARDED_EVENTS) {
             window.removeEventListener(type, this._onOfflineActivation, true);
         }
+        for (const type of OFFLINE_POINTER_EVENTS) {
+            document.removeEventListener(type, this._onOfflineActivation, true);
+        }
+        this._offlineNotice?.close();
+        this._offlineNotice = null;
         this._onlineUI();
         browser.clearTimeout(this._timeout);
     }
@@ -438,10 +449,11 @@ export class OfflinePlugin extends Plugin {
     _offlineUI() {
         const selector = OfflinePlugin.SELECTORS_TO_DISABLE.join(", ");
         for (const [el, state] of this._gatedControls) {
+            const native = !el.hasAttribute("data-offline-reason");
             if (
                 !el.isConnected ||
                 el.hasAttribute("data-available-offline") ||
-                (state.native && el.hasAttribute("data-offline-reason")) ||
+                state.native !== native ||
                 (!state.native && (!el.matches(selector) || state.reason !== this._offlineReason(el)))
             ) {
                 this._restoreOfflineControl(el, state);
@@ -452,25 +464,31 @@ export class OfflinePlugin extends Plugin {
                 continue;
             }
             const reason = this._offlineReason(el);
-            // Legacy standalone clients keep native disabling unless they supply a reason.
-            const native = !el.closest(".o_web_client, .o_action_manager, .o_dialog") &&
-                !el.hasAttribute("data-offline-reason");
+            // Generic buttons keep native disabling. A reason attribute opts into focusable gating.
+            const native = !el.hasAttribute("data-offline-reason");
             const ariaDisabled = el.getAttribute("aria-disabled");
             const describedBy = el.getAttribute("aria-describedby");
             const hadClass = el.classList.contains("o_disabled_offline");
             const description = this._getOfflineDescription(reason);
-            this._gatedControls.set(el, { native, reason, ariaDisabled, description, hadClass });
-            el.setAttribute("aria-disabled", "true");
+            const tooltip = ["data-tooltip", "data-tooltip-template", "title"].map((name) =>
+                [name, el.getAttribute(name)]
+            );
+            this._gatedControls.set(el, { native, reason, ariaDisabled, description, hadClass, tooltip });
             el.setAttribute("aria-describedby", [describedBy, description].filter(Boolean).join(" "));
+            el.setAttribute("data-tooltip", reason);
+            el.setAttribute("title", reason);
+            el.removeAttribute("data-tooltip-template");
             el.classList.add("o_disabled_offline");
             if (native) {
                 el.setAttribute("disabled", "");
+            } else {
+                el.setAttribute("aria-disabled", "true");
             }
         }
     }
 
     _offlineReason(el) {
-        return el.dataset.offlineReason || String(_t("This action needs a connection."));
+        return el.dataset.offlineReason || String(_t("Needs a connection"));
     }
 
     _getOfflineDescription(reason) {
@@ -494,8 +512,17 @@ export class OfflinePlugin extends Plugin {
             return;
         }
         const target = ev.submitter || ev.target;
-        const control = target.closest?.("button, [data-offline-reason]") ||
+        let control = target.closest?.("button, [data-offline-reason]") ||
             (ev.type === "submit" ? target.querySelector('button[type="submit"], button:not([type])') : null);
+        if (OFFLINE_POINTER_EVENTS.includes(ev.type) && ev instanceof MouseEvent &&
+            (ev.type === "pointerdown" || ev.detail > 0)) {
+            // A browser can retarget events on disabled buttons. Only use the top hit,
+            // so a button behind an overlay can't intercept a click on that overlay.
+            const hit = document.elementsFromPoint(ev.clientX, ev.clientY)[0]?.closest(".o_disabled_offline");
+            if (this._gatedControls.get(hit)?.native) {
+                control = hit;
+            }
+        }
         if (!control || control.hasAttribute("data-available-offline")) {
             return;
         }
@@ -503,27 +530,44 @@ export class OfflinePlugin extends Plugin {
             return;
         }
         ev.stopImmediatePropagation();
-        if (keyboard || ["click", "auxclick", "dblclick", "submit"].includes(ev.type)) {
+        if (keyboard || ["pointerdown", "click", "auxclick", "dblclick", "submit"].includes(ev.type)) {
             ev.preventDefault();
         }
-        if (["click", "auxclick", "submit"].includes(ev.type) || (ev.type === "keydown" && !ev.repeat)) {
+        if (["pointerdown", "click", "auxclick", "submit"].includes(ev.type) ||
+            (ev.type === "keydown" && !ev.repeat)) {
             this.explainUnavailable(this._offlineReason(control));
         }
     }
 
-    explainUnavailable(reason = _t("This action needs a connection.")) {
-        this.notification.add(reason, { type: "info" });
+    explainUnavailable(reason = _t("Needs a connection")) {
+        const now = Date.now();
+        const notice = this._offlineNotice;
+        if (notice?.reason === String(reason) && now - notice.at < OFFLINE_NOTICE_INTERVAL) {
+            return;
+        }
+        notice?.close();
+        this._offlineNotice = {
+            reason: String(reason),
+            at: now,
+            close: this.notification.add(reason, { type: "info" }),
+        };
     }
 
     _restoreOfflineControl(el, state) {
         this._gatedControls.delete(el);
         if (state.native) {
             el.removeAttribute("disabled");
-        }
-        if (state.ariaDisabled === null) {
+        } else if (state.ariaDisabled === null) {
             el.removeAttribute("aria-disabled");
         } else {
             el.setAttribute("aria-disabled", state.ariaDisabled);
+        }
+        for (const [name, value] of state.tooltip) {
+            if (value === null) {
+                el.removeAttribute(name);
+            } else {
+                el.setAttribute(name, value);
+            }
         }
         const ids = el.getAttribute("aria-describedby")?.split(/\s+/).filter((id) => id !== state.description);
         if (ids?.length) {
