@@ -186,10 +186,11 @@ class OfflineSystray extends Component {
     });
 
     isClickable(value) {
-        const resId = (value.legacyArgs || value.args)[0]?.[0] || false;
+        const resId = value.resolvedResId ?? (value.legacyArgs || value.args)[0]?.[0] ?? false;
         return (
             value.method === "web_save" &&
             value.extras?.viewType === "form" &&
+            (!value.legacyArgs || Boolean(value.resolvedResId)) &&
             (!this.offlinePlugin.isOffline() ||
                 this.offlinePlugin.isAvailableOffline(value.extras.actionId, "form", resId))
         );
@@ -263,7 +264,10 @@ class OfflineSystray extends Component {
 
     async openView(entry, exact = false) {
         this.dropdown.close();
-        const resId = (entry.legacyArgs || entry.args)[0]?.[0];
+        if (!this.isClickable(entry)) {
+            return;
+        }
+        const resId = entry.resolvedResId ?? entry.args[0]?.[0];
         const siblings = this.offlinePlugin.getPendingEntries().filter((item) => item.legacyKey === entry.legacyKey);
         await this.actionService.doAction(entry.extras.actionId, {
             viewType: "form",
