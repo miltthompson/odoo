@@ -23,6 +23,7 @@ import {
     extractInfoFromGroupData,
     getAggregateSpecifications,
     getBasicEvalContext,
+    getFieldBaseContext,
     getFieldsSpec,
     getGroupServerValue,
     getId,
@@ -131,6 +132,7 @@ export class RelationalModel extends Model {
     static withCache = true;
 
     dataFreshness = signal(null);
+    _recordSaveVersion = 0;
 
     offlineFreshnessText() {
         const freshness = this.dataFreshness();
@@ -447,7 +449,11 @@ export class RelationalModel extends Model {
         }
         const firstLoad = !this.isReady();
         const currentResId = config.resId;
-        const defaultScope = JSON.stringify([[], { ...user.context, ...config.context }]);
+        const recordSaveVersion = this._recordSaveVersion;
+        const defaultScope = JSON.stringify([
+            [],
+            { ...user.context, ...getFieldBaseContext(config.context) },
+        ]);
         // A search can change while its read is in flight. Save the search that started it.
         const search = !config.isMonoRecord && this.env.config.actionId
             ? this.env.searchModel.getCurrentSearch()
@@ -470,6 +476,10 @@ export class RelationalModel extends Model {
                     return;
                 }
                 this._cacheMany2X(config, result, defaultScope);
+                // A completed inline save can leave the root and load IDs unchanged.
+                if (!root.config.isMonoRecord && recordSaveVersion !== this._recordSaveVersion) {
+                    return;
+                }
                 if (!hasChanged) {
                     onRefresh();
                     return;
@@ -521,7 +531,10 @@ export class RelationalModel extends Model {
                 }
                 await this.mutex.exec(async () => {
                     const canRefresh = () =>
-                        root.id === this.root.id && loadId === root.config.loadId && !root.editedRecord;
+                        root.id === this.root.id &&
+                        loadId === root.config.loadId &&
+                        recordSaveVersion === this._recordSaveVersion &&
+                        !root.editedRecord;
                     if (!canRefresh()) {
                         return;
                     }

@@ -106,6 +106,24 @@ test("a retargeted tap on a native disabled button explains it once without reac
     expect(".o_notification_content").toHaveCount(0);
 });
 
+test("a newly available control keeps the tooltip provided by its component", async () => {
+    await mountWithCleanup(OfflineControlFixture);
+    const offline = getService(OfflinePlugin);
+    const button = document.querySelector(".o_test_explained");
+    offline.setOffline(true);
+    expect(button).toHaveAttribute("data-tooltip", "Needs a connection to send");
+
+    button.setAttribute("data-tooltip", "Send saved item");
+    button.setAttribute("data-tooltip-template", "saved-item-tooltip");
+    button.setAttribute("data-available-offline", "");
+    await animationFrame();
+
+    expect(button).not.toHaveAttribute("aria-disabled");
+    expect(button).not.toHaveAttribute("title");
+    expect(button).toHaveAttribute("data-tooltip", "Send saved item");
+    expect(button).toHaveAttribute("data-tooltip-template", "saved-item-tooltip");
+});
+
 test("an explicitly explained button stays focusable but rejects pointer, touch and keyboard activation", async () => {
     await mountWithCleanup(OfflineControlFixture);
     const offline = getService(OfflinePlugin);

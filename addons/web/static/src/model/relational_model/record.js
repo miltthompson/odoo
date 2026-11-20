@@ -1283,6 +1283,7 @@ export class Record extends DataPoint {
             const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
             const succeeded = navigator.sendBeacon(route, blob);
             if (succeeded) {
+                this.model._recordSaveVersion++;
                 this._changes = markRaw({});
                 this.dirty = false;
             } else {
@@ -1354,6 +1355,7 @@ export class Record extends DataPoint {
             const resIds = this.resIds.concat([resId]);
             this.model._updateConfig(this.config, { resId, resIds }, { reload: false });
         }
+        this.model._recordSaveVersion++;
         await this.model.hooks.onRecordSaved(this, changes);
         if (reload) {
             if (this.resId) {
@@ -1413,6 +1415,7 @@ export class Record extends DataPoint {
             }
         );
 
+        this.model._recordSaveVersion++;
         this._commitSave();
         return true;
     }

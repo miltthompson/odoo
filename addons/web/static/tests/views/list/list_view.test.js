@@ -21155,42 +21155,77 @@ test("offline text search filters the saved page without a new read", async () =
     expect.verifySteps([]);
 });
 
-test.tags("desktop");
-test("a slow list refresh preserves an inline edit made on the saved page", async () => {
-    let model;
-    let response;
-    patchWithCleanup(ListController.prototype, {
-        setup() {
-            super.setup();
-            model = this.model;
-        },
-    });
-    onRpc("web_search_read", async ({ parent }) => {
-        if (response) {
-            await response.promise;
-            const result = await parent();
-            result.records[0].foo = "server value";
-            expect.step("server value returned");
-            return result;
+for (const save of [false, true]) {
+    test.tags("desktop");
+    test(`a slow list refresh preserves an ${save ? "already saved" : "in-progress"} inline edit`, async () => {
+        let model;
+        let response;
+        patchWithCleanup(ListController.prototype, {
+            setup() {
+                super.setup();
+                model = this.model;
+            },
+        });
+        onRpc("web_search_read", async ({ parent }) => {
+            if (response) {
+                const result = await parent();
+                result.records[0].foo = "server snapshot before the edit";
+                await response.promise;
+                expect.step("server snapshot returned");
+                return result;
+            }
+        });
+        await mountView({
+            resModel: "foo",
+            type: "list",
+            arch: `<list editable="bottom"><field name="foo"/></list>`,
+        });
+        response = Promise.withResolvers();
+        const load = model.load();
+        await advanceTime(600);
+        await load;
+        await contains(".o_data_cell[name='foo']").click();
+        const editor = ".o_selected_row [name='foo'] input";
+        await contains(editor).edit("inline edit", { confirm: false });
+        if (save) {
+            await contains(".o_list_button_save").click();
+            expect(editor).toHaveCount(0);
         }
+        response.resolve();
+        await expect.waitForSteps(["server snapshot returned"]);
+        await animationFrame();
+        if (save) {
+            expect(".o_data_cell[name='foo']:first").toHaveText("inline edit");
+        } else {
+            expect(editor).toHaveValue("inline edit");
+        }
+        expect(".o_offline_freshness").toHaveText(/Saved on this device/);
     });
+}
+
+test.tags("desktop");
+test("clicking an unavailable action does not save the edited list row offline", async () => {
+    const setOffline = mockOffline();
     await mountView({
         resModel: "foo",
         type: "list",
-        arch: `<list editable="bottom"><field name="foo"/></list>`,
+        arch: `<list editable="bottom">
+            <header>
+                <button name="display" type="object" string="Unavailable" display="always"/>
+            </header>
+            <field name="foo"/>
+        </list>`,
     });
-    response = Promise.withResolvers();
-    const load = model.load();
-    await advanceTime(600);
-    await load;
     await contains(".o_data_cell[name='foo']").click();
     const editor = ".o_selected_row [name='foo'] input";
     await contains(editor).edit("unsaved edit", { confirm: false });
-    response.resolve();
-    await expect.waitForSteps(["server value returned"]);
+    await setOffline(true);
+    const button = queryOne("button[name='display']");
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     await animationFrame();
     expect(editor).toHaveValue("unsaved edit");
-    expect(".o_offline_freshness").toHaveText(/Saved on this device/);
+    expect(getService(OfflinePlugin).hasScheduledCalls).toBe(false);
 });
 
 test.tags("desktop");

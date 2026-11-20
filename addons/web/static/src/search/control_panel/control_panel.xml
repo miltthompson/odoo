@@ -115,6 +115,9 @@
                     <t t-call-slot="control-panel-navigation-additional"/>
                 </div>
             </div>
+            <div t-if="this.offlinePlugin.isOffline()" class="o_offline_control_note small text-muted d-print-none">
+                Greyed-out actions need a connection
+            </div>
         </div>
     </t>
 </templates>
