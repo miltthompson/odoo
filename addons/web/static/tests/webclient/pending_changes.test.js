@@ -1,8 +1,11 @@
-import { animationFrame, expect, press, queryAllTexts, queryOne, runAllTimers, test } from "@odoo/hoot";
+import { animationFrame, expect, press, queryAllTexts, queryOne, runAllTimers, test, waitFor } from "@odoo/hoot";
 import { offlineRecordId } from "@web/core/offline/offline_id";
 import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { WebClient } from "@web/webclient/webclient";
-import { contains, getService, mockOffline, mountWithCleanup, onRpc, patchWithCleanup } from "@web/../tests/web_test_helpers";
+import {
+    contains, defineActions, defineModels, fields, getService, mockOffline, models,
+    mountWithCleanup, onRpc, patchWithCleanup, webModels,
+} from "@web/../tests/web_test_helpers";
 
 function schedule(offline, id, label, timeStamp) {
     offline.scheduleORM("res.partner", "write", [[id], { name: label }], {}, {
@@ -67,6 +70,38 @@ test("a rejected change shows its reason and can be retried", async () => {
     await animationFrame();
     expect(queryOne(`${liveRegion} span`)).not.toBe(firstAnnouncement);
     expect(liveRegion).toHaveText("All changes sent");
+});
+
+test("Open shows the values of the selected save when two saves share a legacy key", async () => {
+    class PendingContact extends models.Model {
+        _name = "pending.contact";
+        name = fields.Char();
+        _records = [{ id: 1, name: "Server value" }];
+        _views = { "form,false": '<form><field name="name" readonly="1"/></form>' };
+    }
+    defineModels([PendingContact, ...Object.values(webModels)]);
+    defineActions([{ id: 5, res_model: "pending.contact", views: [[false, "form"]] }]);
+    await mountWithCleanup(WebClient);
+    await runAllTimers();
+    const offline = getService(OfflinePlugin);
+    const legacyKey = "same-form-save";
+    await offline.scheduleORMBatch(["First queued name", "Second queued name"].map((name) => ({
+        model: "pending.contact",
+        method: "web_save",
+        args: [[1], { name }],
+        kwargs: {},
+        options: {
+            id: legacyKey,
+            extras: { actionId: 5, viewType: "form", changes: { name } },
+        },
+    })));
+
+    await contains(".o_offline_systray").click();
+    await contains(".o_offline_pending_item button:contains(Open):first").click();
+    await waitFor(".o_form_view .o_field_widget[name='name']:contains(First queued name)");
+    await contains(".o_offline_systray").click();
+    await contains(".o_offline_pending_item button:contains(Open):last").click();
+    await waitFor(".o_form_view .o_field_widget[name='name']:contains(Second queued name)");
 });
 
 test("Open targets the saved record when a follow-up draft edit is rejected", async () => {
