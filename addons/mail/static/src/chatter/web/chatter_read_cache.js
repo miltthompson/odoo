@@ -182,48 +182,59 @@ class ChatterReadCache {
                 continue;
             }
             const [name, params, requestId] = request;
+            if (name !== "mail.thread" && name !== "/mail/thread/messages") {
+                continue;
+            }
             const { thread_model: model, thread_id: id, access_params: accessParams } = params ?? {};
             if (!isCacheableChatter(model, id, accessParams)) {
                 continue;
             }
-            if (name !== "mail.thread" && name !== "/mail/thread/messages") {
-                continue;
-            }
             const threadKey = JSON.stringify([model, id]);
             if (!changes.has(threadKey)) {
-                changes.set(threadKey, { model, id, requests: [] });
+                const thread = payload["mail.thread"]?.find((row) => row.model === model && row.id === id);
+                changes.set(threadKey, { model, id, thread, pages: [] });
             }
-            changes.get(threadKey).requests.push({ name, params, requestId });
+            const change = changes.get(threadKey);
+            const { thread } = change;
+            // Project and detach server data before Store.insert converts relations in place.
+            if (
+                name === "mail.thread" &&
+                params.request_list?.includes("activities") &&
+                thread?.hasReadAccess &&
+                Array.isArray(thread.activities)
+            ) {
+                const data = projectRecords(payload, "mail.activity", thread.activities);
+                data["mail.thread"] = [
+                    pick(thread, "id", "model", "activities", "hasReadAccess", "hasWriteAccess", "canPostOnReadonly"),
+                ];
+                change.activities = structuredClone(data);
+            } else if (name === "/mail/thread/messages" && params.fetch_params?.around == null) {
+                const ids = payload.DataResponse?.find((row) => row.id === requestId)?.messages;
+                if (Array.isArray(ids)) {
+                    const data = projectRecords(payload, "mail.message", ids);
+                    change.pages.push({ params: params.fetch_params, ids: [...ids], data: structuredClone(data) });
+                }
+            }
         }
-        await Promise.all([...changes.values()].map(async ({ model, id, requests }) => {
-            const thread = payload["mail.thread"]?.find((row) => row.model === model && row.id === id);
-            const key = await this.key(model, id, context);
-            if (thread?.hasReadAccess === false) {
-                return this.mutex.exec(() => this.db.delete(TABLE, key));
+        await Promise.all([...changes.values()].map(async ({ model, id, thread, activities, pages }) => {
+            const denied = thread?.hasReadAccess === false;
+            if (!denied && !activities && !pages.length) {
+                return;
             }
+            const key = await this.key(model, id, context);
             const savedAt = Date.now();
             return this.mutex.exec(async () => {
+                if (denied) {
+                    await this.db.delete(TABLE, key);
+                    return;
+                }
                 const snapshot = (await this.readByKey(key).catch(() => undefined)) ?? {};
-                let changed = false;
-                for (const { name, params, requestId } of requests) {
-                    if (
-                        name === "mail.thread" &&
-                        params.request_list?.includes("activities") &&
-                        thread?.hasReadAccess &&
-                        Array.isArray(thread.activities)
-                    ) {
-                        const data = projectRecords(payload, "mail.activity", thread.activities);
-                        data["mail.thread"] = [
-                            pick(thread, "id", "model", "activities", "hasReadAccess", "hasWriteAccess", "canPostOnReadonly"),
-                        ];
-                        snapshot.activities = { data, savedAt };
-                        changed = true;
-                    } else if (name === "/mail/thread/messages") {
-                        const response = payload.DataResponse?.find((row) => row.id === requestId);
-                        changed = this.captureMessages(
-                            snapshot, params.fetch_params, response?.messages, payload, savedAt
-                        ) || changed;
-                    }
+                let changed = Boolean(activities);
+                if (activities) {
+                    snapshot.activities = { data: activities, savedAt };
+                }
+                for (const { params, ids, data } of pages) {
+                    changed = this.captureMessages(snapshot, params, ids, data, savedAt) || changed;
                 }
                 if (changed) {
                     const data = await this.crypto.encrypt(snapshot);
@@ -239,11 +250,7 @@ class ChatterReadCache {
         }));
     }
 
-    captureMessages(snapshot, { before, after, around, limit } = {}, ids, payload, savedAt) {
-        if (!Array.isArray(ids) || around != null) {
-            return false;
-        }
-        const page = projectRecords(payload, "mail.message", ids);
+    captureMessages(snapshot, { before, after, limit } = {}, ids, page, savedAt) {
         const previous = snapshot.messages;
         if (before != null && before === previous?.ids[0]) {
             snapshot.messages = {

@@ -7,11 +7,13 @@ import {
 } from "@mail/../tests/mail_test_helpers";
 import { getChatterReadCache } from "@mail/chatter/web/chatter_read_cache";
 
-import { expect, test } from "@odoo/hoot";
+import { beforeEach, expect, test } from "@odoo/hoot";
+import { mockDate } from "@odoo/hoot-mock";
 
 import { getService, mockOffline, serverState } from "@web/../tests/web_test_helpers";
 import { user } from "@web/core/user";
 import { patch } from "@web/core/utils/patch";
+import { session } from "@web/session";
 
 const MODEL = "res.partner";
 const threadParams = (id) => ({ thread_model: MODEL, thread_id: id });
@@ -38,6 +40,18 @@ function historyResponse(id, ids) {
 }
 
 defineMailModels();
+let cacheVersion = 0;
+beforeEach(() => {
+    mockDate("2026-11-20 12:00:00");
+    // HOOT resets the contents of its IndexedDB mock after each test.
+    patch(session, { registry_hash: `chatter-test-${++cacheVersion}` });
+    patch(window.crypto.subtle, {
+        // HOOT already mocks encryption; preserve distinct inputs for cache-key assertions.
+        async digest(_algorithm, input) {
+            return input.buffer;
+        },
+    });
+});
 
 test("offline chatter retains contiguous history and isolates users and companies", async () => {
     const cache = getChatterReadCache();
@@ -96,17 +110,21 @@ test("offline chatter restores notes and activities with explained unavailable c
     const captured = Promise.withResolvers();
     patch(cache, {
         async capture() {
-            await super.capture(...arguments);
-            const snapshot = await this.read(MODEL, id);
-            if (snapshot?.activities && snapshot?.messages) {
-                captured.resolve();
+            try {
+                await super.capture(...arguments);
+                captured.resolve(await this.read(MODEL, id));
+            } catch (error) {
+                captured.reject(error);
             }
         },
     });
+    const openedAt = Date.now();
     await openFormView(MODEL, id);
     await contains(".o-mail-Message", { text: "Internal note about the quote" });
     await contains(".o-mail-Activity", { text: "Call about the quote" });
-    await captured.promise;
+    const saved = await captured.promise;
+    expect(saved?.activities?.savedAt).toBeGreaterThan(openedAt);
+    expect(saved?.messages?.savedAt).toBeGreaterThan(openedAt);
     const thread = getService("mail.store")["mail.thread"].get({ model: MODEL, id });
     // Simulate re-opening in a fresh mail store without relying on the warm in-memory thread.
     thread.hasLoadedChatterActivities = false;
@@ -118,7 +136,7 @@ test("offline chatter restores notes and activities with explained unavailable c
     await contains(".o-mail-Message", { text: "Quote sent" });
     await contains(".o-mail-Message", { text: "Internal note about the quote" });
     await contains(".o-mail-Activity", { text: "Call about the quote" });
-    await contains(".o-mail-Chatter-savedAt", { text: "Saved on this device" });
+    await contains(".o-mail-Chatter-savedAt", { text: "Saved on this device · updated now" });
     await contains(".o-mail-Chatter-sendMessage:disabled");
     await contains(".o-mail-Followers-button:disabled");
     await contains(".o-mail-Chatter-attachFiles:disabled");
