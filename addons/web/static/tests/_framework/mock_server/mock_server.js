@@ -559,6 +559,7 @@ export class MockServer {
             this.callKw,
             { final: true }
         );
+        this._onRoute(["/web/offline/sync"], this.callKw, { final: true });
         this._onRoute(["/web/dataset/resequence"], this.resequence);
         this._onRoute(["/web/image/<string:model>/<int:id>/<string:field>"], this.loadImage);
         this._onRoute(["/web/webclient/load_menus"], this.loadMenus);

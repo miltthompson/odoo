@@ -24,6 +24,12 @@
             </button>
             <t t-set-slot="content">
                 <div class="o_offline_systray_content px-2">
+                    <section t-if="this.offlinePlugin.getLegacyPendingCount()" class="p-2">
+                        <p>Changes from before the update. Confirm they are yours before sending them.</p>
+                        <button class="btn btn-primary me-2" data-available-offline="" t-on-click="() => this.resolveLegacyChanges(true)">Send my changes</button>
+                        <button class="btn btn-secondary" data-available-offline="" t-on-click="() => this.resolveLegacyChanges(false)">Discard</button>
+                    </section>
+                    <p t-if="this.offlinePlugin.getQueueError()" role="alert" class="text-danger" t-out="this.offlinePlugin.getQueueError()"/>
                     <t t-foreach="this.groupEntries()" t-as="entry" t-key="entry[0]">
                         <div class="o_horizontal_separator text-uppercase fw-bolder small mb-1">
                             <span t-out="entry[0]"/>
@@ -52,6 +58,7 @@
                                         <t class="o_tag_badge_text o_badge_text" t-out="element.status.label"/>
                                     </span>
                                 </div>
+                                <button t-if="element.retryKey" class="btn btn-link p-0 ms-1" data-available-offline="" t-on-click.stop="() => this.offlinePlugin.retryPendingChange(element.retryKey)">Retry</button>
                                 <div>
                                     <button
                                         class="oi oi-filled btn btn-link text-danger py-0" data-icon="delete"

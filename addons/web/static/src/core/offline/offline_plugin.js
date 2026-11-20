@@ -14,7 +14,8 @@ import { NonSecureContextError } from "@web/core/errors/non_secure_context_error
 import { _t } from "@web/core/l10n/translation";
 import { normalize } from "@web/core/l10n/utils";
 import { ConnectionLostError, rpc, rpcBus } from "@web/core/network/rpc";
-import { ORM } from "@web/core/orm_plugin";
+import { OfflineQueueStore, offlineDatabaseName, withLegacyQueue } from "./offline_storage";
+import { user } from "@web/core/user";
 import { registry } from "@web/core/registry";
 import { services } from "@web/core/services";
 import { IndexedDB } from "@web/core/utils/indexed_db";
@@ -42,21 +43,25 @@ class FakeIndexedDB {
 export class OfflinePlugin extends Plugin {
     static VISITED_UI_TABLE_NAME = "visited-ui-items";
     static VISITED_UI_TABLE_NAME_DEBUG = "visited-ui-items-debug";
-    static ORM_SYNC_TABLE_NAME = "orm-to-sync";
     static MANY2X_TABLE_PREFIX = "many2x_";
 
     static SELECTORS_TO_DISABLE = ["button:not([data-available-offline]):not([disabled])"];
 
     debugMode = usePlugin(DebugModePlugin);
-    orm = usePlugin(ORM);
-
-    _idb = window.isSecureContext
-        ? markRaw(new IndexedDB("offline", session.registry_hash + CRYPTO_ALGO))
+    _owner = { db: session.db, uid: user.userId };
+    _idb = window.isSecureContext && this._owner.uid && this._owner.db
+        ? markRaw(new IndexedDB(offlineDatabaseName("offline", this._owner), session.registry_hash + CRYPTO_ALGO))
         : new FakeIndexedDB();
     _crypto =
         window.isSecureContext &&
-        session.browser_cache_secret &&
+        this._owner.uid && this._owner.db && session.browser_cache_secret &&
         new Crypto(session.browser_cache_secret);
+    _queue = null;
+    _pending = signal([]);
+    _legacyCount = signal(0);
+    syncPaused = signal(false);
+    _queueFailure = signal(null);
+    _writes = Promise.resolve();
     _visitedUITable = computed(() =>
         this.debugMode.isActive()
             ? OfflinePlugin.VISITED_UI_TABLE_NAME_DEBUG
@@ -107,15 +112,20 @@ export class OfflinePlugin extends Plugin {
             this._visited.set({});
         });
 
-        this._updateScheduledORMList().then(async () => {
-            if (!this.isOffline()) {
-                // wait a bit for the webclient to be started before synchronizing
-                await new Promise((r) => browser.setTimeout(r, 3000));
-                this._syncORM();
-            }
-        });
+        if (this._crypto) {
+            this._queue = markRaw(new OfflineQueueStore(this._owner, session.browser_cache_secret));
+            this._queueReady = Promise.all([
+                this._queue.keyReady,
+                this._queue.lock(() => this._refreshQueue()),
+            ]).catch(() => this._reportStorageError());
+            this._readLegacyCount().catch(() => this._reportStorageError());
+            this._syncTimeout = browser.setTimeout(() => this._syncORM(), 3000);
+        }
 
-        onWillDestroy(() => this._cleanup());
+        onWillDestroy(() => {
+            browser.clearTimeout(this._syncTimeout);
+            this._cleanup();
+        });
     }
 
     /**
@@ -206,6 +216,7 @@ export class OfflinePlugin extends Plugin {
             // Searches for that action/view type haven't been retrieve from idb yet
             this._visited()[actionId].views[viewType] = this._idb
                 .read(this._visitedUITable(), this._generateKey(actionId, viewType))
+                .then((value) => this._decryptSearch(value))
                 .then((r) =>
                     Object.values(r || {})
                         .reverse() // last visited first
@@ -254,13 +265,19 @@ export class OfflinePlugin extends Plugin {
             if (["form", "kanban_quick_create", "list_quick_create"].includes(viewType)) {
                 value = true;
             } else {
-                value = (await this._idb.read(this._visitedUITable(), key)) || {};
+                const saved = await this._idb.read(this._visitedUITable(), key);
+                value = (saved && await this._decryptSearch(saved)) || {};
                 let count = value[search.key]?.count || 0;
                 search = value[search.key]?.search || search; // keep original search (no "Custom Filter")
                 delete value[search.key]; // delete and re-add to mark it as "last visited"
                 value[search.key] = { count: ++count, search };
             }
-            return this._idb.write(this._visitedUITable(), key, value);
+            if (this._crypto && !this._clearing) {
+                const encrypted = await this._crypto.encrypt(value);
+                if (!this._clearing) {
+                    return this._idb.write(this._visitedUITable(), key, encrypted);
+                }
+            }
         }
     }
 
@@ -268,26 +285,111 @@ export class OfflinePlugin extends Plugin {
     // ORM Offline
     // -------------------------------------------------------------------------
 
-    scheduleORM(model, method, args, kwargs, options) {
-        if (!window.isSecureContext) {
-            throw new NonSecureContextError(
-                _t("Offline features not available in a non-secure context")
-            );
+    scheduleORM(model, method, args, kwargs, options = {}) {
+        if (!this._queue) {
+            throw new NonSecureContextError(_t("Offline changes are not available in this session."));
         }
         const value = { model, method, args, kwargs, extras: options.extras };
-        const key = options.id ?? hashCode(JSON.stringify(value));
-        this._ormToSync()[key] = { key, value };
-        this._idb.write(OfflinePlugin.ORM_SYNC_TABLE_NAME, key, JSON.stringify(value));
-        return key;
+        const legacyKey = options.id ?? hashCode(JSON.stringify(value));
+        const entry = this._makeEntry(legacyKey, value, options);
+        this._pending.set([...this._pending(), entry]);
+        this._ormToSync()[legacyKey] = { key: legacyKey, value };
+        this._enqueueWrite(async () => {
+            const saved = await this._queue.add(entry);
+            this._replaceEntry(saved);
+        });
+        return legacyKey;
     }
 
-    removeScheduledORM(key) {
-        delete this._ormToSync()[key];
-        this._idb.delete(OfflinePlugin.ORM_SYNC_TABLE_NAME, key);
+    removeScheduledORM(legacyKey) {
+        const entry = this.getPendingEntry(legacyKey);
+        if (entry) {
+            delete this._ormToSync()[legacyKey];
+            return this.discardPendingChange(entry.key);
+        }
     }
 
     get hasScheduledCalls() {
-        return !!Object.keys(this._ormToSync()).length;
+        return !!Object.keys(this._ormToSync()).length || !!this._legacyCount() || !!this.getQueueError();
+    }
+
+    /** The durable queue in send order. `key` is the sync UUID, not the compatibility key. */
+    getPendingEntries() {
+        return this._pending();
+    }
+
+    getPendingEntry(legacyKey) {
+        return this._pending().findLast((entry) => String(entry.legacyKey) === String(legacyKey));
+    }
+
+    getQueueReady() {
+        return this._queueReady;
+    }
+
+    getLegacyPendingCount() {
+        return this._legacyCount();
+    }
+
+    getQueueError() {
+        return this._queueFailure();
+    }
+
+    async clearReadStores() {
+        this._clearing = true;
+        this._visited.set({});
+        await this._idb.invalidate();
+    }
+
+    async retryPendingChange(key) {
+        await this._enqueueWrite(async () => {
+            const entry = await this._queue.get(key);
+            const unwritten = this._pending().find((item) => item.key === key && item.seq === null);
+            if (!entry && unwritten) {
+                this._replaceEntry(await this._queue.add(unwritten));
+            } else if (entry?.state === "needs_attention") {
+                await this._storeState(entry, "waiting");
+            }
+        });
+        return this._syncORM();
+    }
+
+    async discardPendingChange(key) {
+        await this._enqueueWrite(async () => {
+            const entry = await this._queue.get(key);
+            if (entry?.state !== "sending") {
+                await this._queue.remove(key);
+                this._removeEntry(key);
+            }
+        });
+        return this._syncORM();
+    }
+
+    /** Only call after the user has explicitly confirmed ownership (or confirmed discard). */
+    async resolveLegacyChanges(send) {
+        await this._enqueueWrite(() => withLegacyQueue(async (rows, legacy, table) => {
+            const mine = rows.filter(({ claim }) => !claim || claim.owner === this._queue.name);
+            const entries = send ? await Promise.all(mine.map(async (row) => ({
+                ...row,
+                value: await row.crypto.decrypt(row.payload),
+            }))) : mine;
+            const existing = new Set((await this._queue.list()).map((entry) => entry.key));
+            entries.sort((a, b) => (a.value?.extras?.timeStamp || 0) - (b.value?.extras?.timeStamp || 0));
+            for (const { key, value, payload, claim } of entries) {
+                if (send) {
+                    const entry = this._makeEntry(key, value, { key: claim?.key });
+                    if (!claim) {
+                        await legacy.write(table, key, { payload, claim: { owner: this._queue.name, key: entry.key } });
+                    }
+                    if (!existing.has(entry.key)) {
+                        await this._queue.add(entry);
+                    }
+                }
+                await legacy.delete(table, key);
+            }
+            await this._refreshQueue();
+            this._legacyCount.set(0);
+        }));
+        return this._syncORM();
     }
 
     // -------------------------------------------------------------------------
@@ -300,7 +402,9 @@ export class OfflinePlugin extends Plugin {
         }
         const tableName = OfflinePlugin.MANY2X_TABLE_PREFIX + resModel;
         const values = await this._encryptAndFormat(result);
-        this._idb.write(tableName, values);
+        if (!this._clearing) {
+            this._idb.write(tableName, values);
+        }
     }
 
     async searchMany2XRecords(resModel, name) {
@@ -340,6 +444,16 @@ export class OfflinePlugin extends Plugin {
         this._onlineUI();
         this._observer?.disconnect();
         browser.clearTimeout(this._timeout);
+    }
+
+    async _decryptSearch(value) {
+        if (value && this._crypto) {
+            try {
+                return await this._crypto.decrypt(value);
+            } catch {
+                // A previous key cannot decrypt this cache, so ignore the saved copy.
+            }
+        }
     }
 
     async _decryptAndFormat(offlineRes) {
@@ -387,7 +501,7 @@ export class OfflinePlugin extends Plugin {
             if (!this.isOffline()) {
                 return; // status changed again meanwhile
             }
-            for (const key of keys) {
+            for (const key of keys || []) {
                 const { action, viewType, resId } = JSON.parse(key);
                 this._visited()[action] = this._visited()[action] || { views: {} };
                 if (viewType === "form") {
@@ -433,52 +547,172 @@ export class OfflinePlugin extends Plugin {
     // ORM Offline
     // -------------------------------------------------------------------------
 
-    async _syncORM() {
-        if (!window.isSecureContext) {
-            return;
-        }
+    _makeEntry(legacyKey, value, options) {
+        const { model, method, args, kwargs, extras } = value;
+        const targetIds = (method !== "create" && Array.isArray(args[0]) &&
+            args[0].filter((id) => typeof id === "number" || typeof id === "string")) || [];
+        return {
+            ...this._owner,
+            key: options.key || window.crypto.randomUUID(),
+            legacyKey,
+            seq: null,
+            model, method, args, kwargs, extras,
+            refs: options.refs || [],
+            target: options.target || { model, ids: targetIds },
+            label: options.label || extras?.displayName || "",
+            acted_at: extras?.timeStamp ?? Date.now(),
+            server_version: session.registry_hash,
+            state: extras?.error ? "needs_attention" : "waiting",
+            error: extras?.error || null,
+        };
+    }
 
-        // Only one tab can execute this block at a time
-        // This can only be done in a secure context
-        await navigator.locks.request("db-sync", async () => {
-            this.syncingORM.set(true);
-            await this._updateScheduledORMList();
+    _replaceEntry(entry) {
+        this._pending.set(this._pending().map((item) => item.key === entry.key ? entry : item));
+    }
 
-            for (const [index, { key, value }] of Object.values(this._ormToSync())
-                .filter(({ value }) => !value.extras.error)
-                .sort((s1, s2) => s1.value.extras.timeStamp - s2.value.extras.timeStamp)
-                .entries()) {
-                if (index !== 0) {
-                    await new Promise((r) => browser.setTimeout(r, 1000)); // Waits 1 second
-                }
-                try {
-                    await this.orm.silent.call(value.model, value.method, value.args, value.kwargs);
-                    this.removeScheduledORM(key);
-                } catch (e) {
-                    if (e instanceof ConnectionLostError) {
-                        break;
-                    }
-                    let error = e.message || _t("Error");
-                    if (e.data) {
-                        error = e.data.name + " - " + e.data.message;
-                    }
-                    this.scheduleORM(value.model, value.method, value.args, value.kwargs, {
-                        id: key,
-                        extras: { ...value.extras, error },
-                    });
-                }
+    _removeEntry(key) {
+        const entry = this._pending().find((item) => item.key === key);
+        if (entry) {
+            this._pending.set(this._pending().filter((item) => item.key !== key));
+            const replacement = this.getPendingEntry(entry.legacyKey);
+            if (replacement) {
+                this._ormToSync()[entry.legacyKey] = this._compatEntry(replacement);
+            } else {
+                delete this._ormToSync()[entry.legacyKey];
             }
-            this.syncingORM.set(false);
+        }
+    }
+
+    _compatEntry(entry) {
+        const { model, method, args, kwargs, extras } = entry;
+        return { key: entry.legacyKey, value: { model, method, args, kwargs, extras } };
+    }
+
+    async _refreshQueue() {
+        const stored = (await this._queue.list()).map((entry) => ({ ...entry, legacyKey: String(entry.legacyKey) }));
+        const knownKeys = new Set(stored.map((entry) => entry.key));
+        const pending = [...stored, ...this._pending().filter((entry) => entry.seq === null && !knownKeys.has(entry.key))];
+        this._pending.set(pending);
+        this._ormToSync.set(Object.fromEntries(pending.map((entry) => [entry.legacyKey, this._compatEntry(entry)])));
+        return stored;
+    }
+
+    _reportStorageError() {
+        this._queueFailure.set(_t("Pending changes could not be read or saved on this device."));
+    }
+
+    _enqueueWrite(callback) {
+        const next = this._writes.then(() => this._queue.lock(callback));
+        this._writes = next.catch(() => this._reportStorageError());
+        return this._writes;
+    }
+
+    _readLegacyCount() {
+        return withLegacyQueue((rows) => {
+            this._legacyCount.set(rows.filter(({ claim }) => !claim || claim.owner === this._queue.name).length);
         });
     }
 
-    async _updateScheduledORMList() {
-        const table = await this._idb.getAllEntries(OfflinePlugin.ORM_SYNC_TABLE_NAME);
-        this._ormToSync.set(
-            Object.fromEntries(
-                table.map((v) => [v.key, { key: v.key, value: JSON.parse(v.value) }])
-            )
-        );
+    async _storeState(entry, state, error = null) {
+        const updated = { ...entry, state, error };
+        await this._queue.write(updated);
+        this._replaceEntry(updated);
+    }
+
+    _reason(error) {
+        switch (error.exceptionName) {
+            case "odoo.exceptions.MissingError":
+                return _t("The record or an earlier change is missing.");
+            case "odoo.exceptions.AccessError":
+                return _t("You no longer have access to this record.");
+            case "odoo.exceptions.ValidationError":
+            case "odoo.exceptions.UserError":
+                return _t("Not applied: %s", error.data.message);
+            default:
+                return _t("Something went wrong on the server. Try again later.");
+        }
+    }
+
+    _isBlocked(entry, blockers) {
+        return blockers.some((previous) => entry.refs.includes(previous.key) || (
+            previous.target.model === entry.target.model &&
+            previous.target.ids.some((id) => entry.target.ids.includes(id))
+        ));
+    }
+
+    async _syncORM() {
+        if (!this._queue || this.isOffline() || this.syncPaused() || this.syncingORM()) {
+            return;
+        }
+        this.syncingORM.set(true);
+        try {
+            await navigator.locks.request(`${this._queue.name}:send`, async () => {
+                await this._writes;
+                const entries = await this._queue.lock(() => this._refreshQueue());
+                const blockers = [];
+                for (const snapshot of entries) {
+                    if (this.isOffline()) {
+                        break;
+                    }
+                    const entry = await this._queue.lock(async () => {
+                        // Another tab may have discarded the item while we were sending an earlier one.
+                        const current = await this._queue.get(snapshot.key);
+                        if (!current) {
+                            this._removeEntry(snapshot.key);
+                            return;
+                        }
+                        if (current.state === "needs_attention") {
+                            blockers.push(current);
+                            return;
+                        }
+                        if (this._isBlocked(current, blockers)) {
+                            blockers.push(current);
+                            await this._storeState(current, "held_back", _t("Waiting for an earlier change on this record."));
+                            return;
+                        }
+                        await this._storeState(current, "sending");
+                        return current;
+                    });
+                    if (!entry) {
+                        continue;
+                    }
+                    const { db, uid, key, model, method, args, kwargs, refs } = entry;
+                    let result;
+                    try {
+                        const xhr = new browser.XMLHttpRequest();
+                        xhr.timeout = 30000;
+                        result = await rpc("/web/offline/sync", {
+                            db, uid, key, model, method, args, refs,
+                            kwargs: { ...kwargs, context: { ...user.context, ...kwargs.context } },
+                        }, { silent: true, xhr });
+                    } catch (error) {
+                        if (error instanceof ConnectionLostError) {
+                            // A lost response is not a rejection. Reuse this UUID on the next send.
+                            await this._queue.lock(() => this._storeState(entry, "waiting"));
+                            break;
+                        }
+                        if (error.code === 100) {
+                            this.syncPaused.set(true);
+                            await this._queue.lock(() => this._storeState(entry, "paused", _t("Log in again to send your changes.")));
+                            break;
+                        }
+                        blockers.push(entry);
+                        await this._queue.lock(() => this._storeState(entry, "needs_attention", this._reason(error)));
+                        continue;
+                    }
+                    await this._queue.lock(async () => {
+                        await this._queue.remove(key);
+                        this._removeEntry(key);
+                    });
+                    rpcBus.trigger("OFFLINE:SYNCED", { entry, result });
+                }
+            });
+        } catch {
+            this._reportStorageError();
+        } finally {
+            this.syncingORM.set(false);
+        }
     }
 }
 

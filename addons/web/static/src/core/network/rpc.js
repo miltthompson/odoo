@@ -82,6 +82,12 @@ rpc.setCache = function (cache) {
     rpcCache = cache;
 };
 
+rpc.clearCache = function () {
+    const cache = rpcCache;
+    rpcCache = undefined;
+    return cache?.invalidate();
+};
+
 rpcBus.addEventListener("CLEAR-CACHES", (event) => {
     rpcCache?.invalidate(event.detail);
 });
@@ -155,11 +161,13 @@ rpc._rpc = function (url, params, settings) {
             reject(error);
         });
         // handle failure
-        request.addEventListener("error", () => {
+        const onConnectionLost = () => {
             const error = new ConnectionLostError(url);
             rpcBus.trigger("RPC:RESPONSE", { data, settings, error });
             reject(error);
-        });
+        };
+        request.addEventListener("error", onConnectionLost);
+        request.addEventListener("timeout", onConnectionLost);
         // configure and send request
         request.open("POST", url);
         const headers = settings.headers || {};
