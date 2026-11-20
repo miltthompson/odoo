@@ -6,6 +6,7 @@ import { useAttachmentUploader } from "@mail/core/common/attachment_uploader_hoo
 import { usePopoutAttachment } from "@mail/core/common/attachment_view";
 import { MailAttachmentDropzone } from "@mail/core/common/mail_attachment_dropzone";
 import { MessageCardList } from "@mail/core/common/message_card_list";
+import { RelativeTime } from "@mail/core/common/relative_time";
 import { useMessageSearch } from "@mail/core/common/message_search_hook";
 import { SearchMessageInput } from "@mail/core/common/search_message_input";
 import { SearchMessageResult } from "@mail/core/common/search_message_result";
@@ -44,6 +45,7 @@ Object.assign(Chatter.components, {
     FileUploader,
     FollowerList,
     MessageCardList,
+    RelativeTime,
     ScheduledMessage,
     SearchMessageInput,
     SearchMessageResult,
@@ -79,6 +81,20 @@ const chatterPatch = {
         // context.
         this.highlightMessage ??= this.webChatterProps.record?.context?.highlight_message_id;
         this.orm = useService("orm");
+        let wasOffline = false;
+        useOnChange(
+            () => [this.isChatterOffline()],
+            (offline) => {
+                const thread = this.thread();
+                if (offline) {
+                    this.followerListDropdown.close();
+                    thread.restoreOfflineChatter();
+                } else if (wasOffline && thread?.id) {
+                    this.load(thread, this.initialRequestList);
+                }
+                wasOffline = offline;
+            }
+        );
         this.keepLastSuggestedRecipientsUpdate = new KeepLast();
         useEffect(() => {
             const record = this.webChatterProps.record;
@@ -140,6 +156,7 @@ const chatterPatch = {
                 },
             },
             () =>
+                !this.isChatterOffline() &&
                 (!this.store.meetingViewOpened || this.env.inMeetingView) &&
                 (this.thread()?.isTransient || this.thread()?.canPostMessage) &&
                 !this.thread()?.messageInEdition?.composer?.isEditComposerVisible
@@ -183,8 +200,16 @@ const chatterPatch = {
         );
     },
 
+    isChatterOffline() {
+        return this.thread()?.isOfflineChatter() ?? false;
+    },
+
+    chatterSavedDate() {
+        return luxon.DateTime.fromMillis(this.thread().chatterSavedAt);
+    },
+
     async updateRecipients(record, mode = this.state.composerType) {
-        if (!record) {
+        if (!record || this.isChatterOffline()) {
             return;
         }
         const partnerIds = []; // Ensure that we don't have duplicates
@@ -273,7 +298,10 @@ const chatterPatch = {
     get subEnv() {
         const res = super.subEnv;
         assignGetter(res.inChatter, { aside: () => this.webChatterProps.isChatterAside });
-        Object.assign(res.inChatter, { toggleComposer: this.toggleComposer.bind(this) });
+        Object.assign(res.inChatter, {
+            toggleComposer: this.toggleComposer.bind(this),
+            isOffline: () => this.isChatterOffline(),
+        });
         return res;
     },
 
@@ -534,6 +562,9 @@ const chatterPatch = {
     },
 
     toggleComposer(mode = false, { force = false } = {}) {
+        if (mode && this.isChatterOffline()) {
+            return;
+        }
         this.closeSearch();
         const toggle = async () => {
             if (!force && this.state.composerType === mode) {

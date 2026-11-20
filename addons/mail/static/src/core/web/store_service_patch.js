@@ -1,8 +1,10 @@
+import { getChatterReadCache } from "@mail/chatter/web/chatter_read_cache";
 import { Store } from "@mail/core/common/store_service";
 import { MENU_TABS } from "@mail/core/public_web/messaging_menu/messaging_menu_model";
 import { browser } from "@web/core/browser/browser";
 import { _t } from "@web/core/l10n/translation";
 import { registry } from "@web/core/registry";
+import { user } from "@web/core/user";
 import { useService } from "@web/core/utils/hooks";
 import { patch } from "@web/core/utils/patch";
 
@@ -81,6 +83,17 @@ const StorePatch = {
             // BroadcastChannel API is not supported (e.g. Safari < 15.4), so disabling it.
             this.activityBroadcastChannel = null;
         }
+    },
+    _fetchStoreDataRpc(fetchParams) {
+        const response = super._fetchStoreDataRpc(...arguments);
+        if (fetchParams.some((param) => Array.isArray(param) && ["mail.thread", "/mail/thread/messages"].includes(param[0]))) {
+            const cache = getChatterReadCache();
+            if (cache) {
+                const context = user.context;
+                response.then((data) => cache.capture(fetchParams, data, context)).catch(() => {});
+            }
+        }
+        return response;
     },
     get activityGroups() {
         return (this.activity_groups || []).slice().sort((g1, g2) => {

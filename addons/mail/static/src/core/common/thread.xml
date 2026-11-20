@@ -35,7 +35,7 @@
                         onParentMessageClick="this.onParentMessageClick"
                         thread="this.props.thread"
                         isFirstMessage="msg_first"
-                        hasActions="!msg.eq(this.channel?.from_message_id)"
+                        hasActions="!this.env.inChatter?.isOffline?.() and !msg.eq(this.channel?.from_message_id)"
                         showDates="this.props.showDates"
                     />
                 </t>
@@ -73,7 +73,8 @@
 </t>
 
 <t t-name="mail.Thread.loadOlder">
-    <button t-att-class="this.loadMoreClass" t-on-click="this.onClickLoadOlder" t-ref="this.loadOlderRef">Load More</button>
+    <p t-if="this.env.inChatter?.isOffline?.()" class="text-muted small p-2 mb-0" role="status">Older messages need a connection.</p>
+    <button t-else="" t-att-class="this.loadMoreClass" t-on-click="this.onClickLoadOlder" t-ref="this.loadOlderRef">Load More</button>
 </t>
 
 <t t-name="mail.Thread.loadingError">

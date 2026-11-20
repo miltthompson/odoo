@@ -112,7 +112,7 @@
                             </div>
                             <div class="position-relative">
                                 <AttachmentList
-                                    t-if="this.message.extra_body_attachment_ids.length > 0 and !this.isEditing"
+                                    t-if="!this.env.inChatter?.isOffline?.() and this.message.extra_body_attachment_ids.length > 0 and !this.isEditing"
                                     attachmentGroups="this.attachmentGroups"
                                     unlinkAttachments.bind="this.onClickAttachmentUnlink"
                                     messageSearch="this.props.messageSearch"/>

@@ -44,7 +44,7 @@ patch(FormRenderer.prototype, {
                 model: this.props.record.resModel,
             })
         );
-        return this.thread().attachmentsInWebClientView.length > 0;
+        return !this.thread().isOfflineChatter() && this.thread().attachmentsInWebClientView.length > 0;
     },
     mailLayout(hasAttachmentContainer) {
         const xxl = this.uiService.size >= SIZES.XXL;
