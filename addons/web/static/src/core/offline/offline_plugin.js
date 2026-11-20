@@ -14,7 +14,7 @@ import { NonSecureContextError } from "@web/core/errors/non_secure_context_error
 import { _t } from "@web/core/l10n/translation";
 import { normalize } from "@web/core/l10n/utils";
 import { ConnectionLostError, rpc, rpcBus } from "@web/core/network/rpc";
-import { OfflineQueueStore, offlineDatabaseName, withLegacyQueue } from "./offline_storage";
+import { OfflineQueueStore, clearLegacyReadStores, offlineDatabaseName, withLegacyQueue } from "./offline_storage";
 import { user } from "@web/core/user";
 import { registry } from "@web/core/registry";
 import { services } from "@web/core/services";
@@ -62,6 +62,7 @@ export class OfflinePlugin extends Plugin {
     syncPaused = signal(false);
     _queueFailure = signal(null);
     _writes = Promise.resolve();
+    _syncAgain = false;
     _visitedUITable = computed(() =>
         this.debugMode.isActive()
             ? OfflinePlugin.VISITED_UI_TABLE_NAME_DEBUG
@@ -180,7 +181,7 @@ export class OfflinePlugin extends Plugin {
             // Retrieve the information about visited items from indexeddb.
             this._visited()[IS_READY] = this._populateVisited();
         } else {
-            this._syncORM();
+            this._syncORM(true);
             this._cleanup();
         }
     }
@@ -322,6 +323,12 @@ export class OfflinePlugin extends Plugin {
         return this._pending().findLast((entry) => String(entry.legacyKey) === String(legacyKey));
     }
 
+    async waitForPendingWrite(key) {
+        await this._writes;
+        const entry = this._pending().find((entry) => entry.key === key);
+        return !entry || entry.seq !== null;
+    }
+
     getQueueReady() {
         return this._queueReady;
     }
@@ -337,7 +344,7 @@ export class OfflinePlugin extends Plugin {
     async clearReadStores() {
         this._clearing = true;
         this._visited.set({});
-        await this._idb.invalidate();
+        await Promise.all([this._idb.invalidate(), clearLegacyReadStores()]);
     }
 
     async retryPendingChange(key) {
@@ -551,13 +558,20 @@ export class OfflinePlugin extends Plugin {
         const { model, method, args, kwargs, extras } = value;
         const targetIds = (method !== "create" && Array.isArray(args[0]) &&
             args[0].filter((id) => typeof id === "number" || typeof id === "string")) || [];
+        // Before a pending create has a record ID, the legacy form reuses its UI key
+        // when reopened. Keep that key, but send the next save as a separate write.
+        const create = options.id !== undefined && method === "web_save" && !args[0]?.length &&
+            this._pending().find((entry) => entry.model === model && entry.method === method &&
+                String(entry.legacyKey) === String(legacyKey) && !entry.args[0]?.length);
         return {
             ...this._owner,
             key: options.key || window.crypto.randomUUID(),
             legacyKey,
             seq: null,
-            model, method, args, kwargs, extras,
-            refs: options.refs || [],
+            model, method, kwargs, extras,
+            args: create ? [[`offline:${create.key}`], ...args.slice(1)] : args,
+            legacyArgs: create ? args : undefined,
+            refs: create ? [create.key, ...(options.refs || [])] : options.refs || [],
             target: options.target || { model, ids: targetIds },
             label: options.label || extras?.displayName || "",
             acted_at: extras?.timeStamp ?? Date.now(),
@@ -585,8 +599,8 @@ export class OfflinePlugin extends Plugin {
     }
 
     _compatEntry(entry) {
-        const { model, method, args, kwargs, extras } = entry;
-        return { key: entry.legacyKey, value: { model, method, args, kwargs, extras } };
+        const { model, method, args, legacyArgs, kwargs, extras } = entry;
+        return { key: entry.legacyKey, value: { model, method, args: legacyArgs || args, kwargs, extras } };
     }
 
     async _refreshQueue() {
@@ -641,8 +655,12 @@ export class OfflinePlugin extends Plugin {
         ));
     }
 
-    async _syncORM() {
-        if (!this._queue || this.isOffline() || this.syncPaused() || this.syncingORM()) {
+    async _syncORM(onReconnect = false) {
+        if (!this._queue || this.isOffline() || this.syncPaused()) {
+            return;
+        }
+        if (this.syncingORM()) {
+            this._syncAgain ||= onReconnect;
             return;
         }
         this.syncingORM.set(true);
@@ -712,6 +730,10 @@ export class OfflinePlugin extends Plugin {
             this._reportStorageError();
         } finally {
             this.syncingORM.set(false);
+            if (this._syncAgain) {
+                this._syncAgain = false;
+                this._syncORM();
+            }
         }
     }
 }

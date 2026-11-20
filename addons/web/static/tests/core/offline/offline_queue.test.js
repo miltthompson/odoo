@@ -45,6 +45,24 @@ test("sync sends all changes by sequence and retries dependencies with the same 
     expect(offline.getPendingEntries()).toEqual([]);
 });
 
+test("editing a legacy local draft queues a write referencing its first create", async () => {
+    const sent = [];
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        sent.push(params);
+        return [{ id: 47 }];
+    });
+    await makeTestApp();
+    const offline = getService(OfflinePlugin);
+    const draft = offline.scheduleORM("res.partner", "web_save", [[], { name: "Draft" }], {});
+    offline.scheduleORM("res.partner", "web_save", [[], { name: "Edited draft" }], {}, { id: draft });
+    expect(offline._ormToSync()[draft].value.args[0]).toEqual([]);
+    await offline._syncORM();
+    expect(sent).toHaveLength(2);
+    expect(sent[1].refs).toEqual([sent[0].key]);
+    expect(sent[1].args).toEqual([[`offline:${sent[0].key}`], { name: "Edited draft" }]);
+});
+
 test("expired login pauses replay without discarding or reclassifying remaining changes", async () => {
     const sent = [];
     onRpc("/web/offline/sync", async (request) => {

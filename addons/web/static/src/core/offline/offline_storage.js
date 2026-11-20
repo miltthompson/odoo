@@ -122,6 +122,14 @@ export class OfflineQueueStore {
     }
 }
 
+export function clearLegacyReadStores() {
+    return navigator.locks.request(LEGACY_LOCK, () => Promise.all([
+        new IndexedDB("offline", undefined, { durability: "strict" }).invalidate([/^visited-ui-items/, /^many2x_/]),
+        new IndexedDB("rpc").invalidate(),
+        new IndexedDB("webclient_menu").invalidate(),
+    ]));
+}
+
 // No version check: reading the old database must not erase an unclaimed queue.
 export function withLegacyQueue(callback) {
     return navigator.locks.request(LEGACY_LOCK, async () => {
