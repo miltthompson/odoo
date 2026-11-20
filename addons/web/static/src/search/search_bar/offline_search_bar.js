@@ -18,6 +18,7 @@ export class OfflineSearchBar extends Component {
     };
     props = useProps({
         autofocus: t.boolean().optional(),
+        model: t.object().optional(),
         toggler: t.object().optional(),
     });
 
@@ -87,6 +88,12 @@ export class OfflineSearchBar extends Component {
         }
     }
 
+    onLocalSearchInput(ev) {
+        if (!ev.isComposing) {
+            return this.props.model.setOfflineSearch(ev.target.value);
+        }
+    }
+
     onRemoveSearch() {
         this.selectSearch(this.emptySearch || this.allSearches[0]);
     }
@@ -105,6 +112,10 @@ export class OfflineSearchBar extends Component {
         } else {
             this.searchBarDropdownState.open();
         }
+    }
+
+    onCompositionEnd(ev) {
+        this.onSearchInput(ev);
     }
 
     onSelect(search) {

@@ -1,10 +1,13 @@
 // @ts-check
 
-import { EventBus, markRaw, usePlugin, toRaw } from "@odoo/owl";
+import { EventBus, markRaw, signal, useEffect, usePlugin, toRaw } from "@odoo/owl";
 import { makeContext } from "@web/core/context";
 import { Domain } from "@web/core/domain";
 import { WarningDialog } from "@web/core/errors/error_dialogs";
+import { _t } from "@web/core/l10n/translation";
+import { normalize } from "@web/core/l10n/utils";
 import { ConnectionLostError } from "@web/core/network/rpc";
+import { user } from "@web/core/user";
 import { shallowEqual } from "@web/core/utils/arrays";
 import { KeepLast, Mutex } from "@web/core/utils/concurrency";
 import { deepCopy, pick } from "@web/core/utils/objects";
@@ -20,6 +23,7 @@ import {
     extractInfoFromGroupData,
     getAggregateSpecifications,
     getBasicEvalContext,
+    getFieldBaseContext,
     getFieldsSpec,
     getGroupServerValue,
     getId,
@@ -127,7 +131,57 @@ export class RelationalModel extends Model {
     static DEFAULT_OPEN_GROUP_LIMIT = 10; // TODO: remove ?
     static withCache = true;
 
-    offlinePlugin = usePlugin(OfflinePlugin);
+    dataFreshness = signal(null);
+    _recordSaveVersion = 0;
+
+    offlineFreshnessText() {
+        const freshness = this.dataFreshness();
+        const offline = this.offlinePlugin.isOffline();
+        if (!freshness || (!offline && !freshness.fromCache) || this.useSampleModel) {
+            return "";
+        }
+        const relative = luxon.DateTime.fromMillis(freshness.timestamp).toRelative();
+        return offline
+            ? _t("Offline: saved on this device %s", relative)
+            : _t("Saved on this device %s", relative);
+    }
+
+    get hasOfflineSearch() {
+        return this.offlinePlugin.isOffline() && Boolean(this.offlineSearch().trim());
+    }
+
+    async setOfflineSearch(query) {
+        await this.mutex.exec(() => {
+            if (this.offlinePlugin.isOffline() && this.offlineSearch() !== query) {
+                this.root?._unselectAll?.();
+                this.offlineSearch.set(query);
+            }
+        });
+    }
+
+    filterOfflineRecords(records) {
+        const query = this.hasOfflineSearch && normalize(this.offlineSearch().trim());
+        if (!query) {
+            return records;
+        }
+        const matches = (text) => typeof text === "string" && normalize(text).includes(query);
+        return records.filter(({ data, fields }) =>
+            Object.keys(data).some((name) => {
+                const value = data[name];
+                switch (fields[name]?.type) {
+                    case "char":
+                    case "text":
+                        return matches(value);
+                    case "many2one":
+                        return matches(value?.display_name);
+                    case "many2many":
+                        return value?.records?.some((record) => matches(record.data.display_name));
+                    default:
+                        return false;
+                }
+            })
+        );
+    }
 
     /**
      * @param {RelationalModelParams} params
@@ -142,6 +196,13 @@ export class RelationalModel extends Model {
 
         this.keepLast = markRaw(new KeepLast());
         this.mutex = markRaw(new Mutex());
+        this.offlinePlugin = usePlugin(OfflinePlugin);
+        this.offlineSearch = signal("");
+        useEffect(() => {
+            if (!this.offlinePlugin.isOffline()) {
+                this.offlineSearch.set("");
+            }
+        });
 
         /** @type {DataPoint | null} */
         this.root = null;
@@ -217,7 +278,24 @@ export class RelationalModel extends Model {
         }
         this.hooks.onWillLoadRoot(config);
         const { promise, resolve } = Promise.withResolvers();
-        const cache = this._getCacheParams(config, promise);
+        let freshness = null;
+        const cache = this._getCacheParams(config, promise, () => {
+            if (this.config.loadId === config.loadId) {
+                this.dataFreshness.set(freshness);
+            }
+        });
+        if (cache && (config.isMonoRecord ? config.resId : !config.resIds)) {
+            // When opening a saved form, or paging to a saved record, keep the existing
+            // cached-first behavior. Reads that require the network can fall back if it is slow.
+            if (this.offlinePlugin.isOffline() || cache.noCache || !config.isMonoRecord) {
+                cache.staleAfter = this.offlinePlugin.isOffline() ? 0 : 600;
+            }
+            Object.assign(cache, {
+                onFreshness: (value) => {
+                    freshness = value;
+                },
+            });
+        }
         let data;
         try {
             data = await this.keepLast.add(this._loadData(config, cache));
@@ -232,6 +310,7 @@ export class RelationalModel extends Model {
         this.root = this._createRoot(config, data);
         resolve({ root: this.root, loadId: config.loadId });
         this.config = config;
+        this.dataFreshness.set(freshness);
         await this.hooks.onRootLoaded(this.root);
     }
 
@@ -277,8 +356,9 @@ export class RelationalModel extends Model {
      *
      * @param {RelationalModelConfig} config
      * @param {Object} data
+     * @param {string} defaultScope
      */
-    _cacheMany2X(config, data) {
+    _cacheMany2X(config, data, defaultScope) {
         let records = [];
         if (config.isMonoRecord) {
             if (!config.resId) {
@@ -291,6 +371,8 @@ export class RelationalModel extends Model {
         } else {
             records = data.records;
         }
+        const seenByModel = new Map();
+        const defaultContextNames = new Map();
         for (const record of records) {
             for (const [fieldName, value] of Object.entries(record)) {
                 const field = config.fields[fieldName];
@@ -307,10 +389,26 @@ export class RelationalModel extends Model {
                         values = value.filter((v) => v.id && v.display_name);
                     }
                     if (values.length) {
-                        this.offlinePlugin.cacheMany2XSearch(field.relation, values);
+                        // Only a server name search can establish candidates for an explicit
+                        // domain or field context. A read can seed the unconstrained picker in
+                        // its own request context, preserving already-visited relationship names.
+                        const hasFieldContext =
+                            activeField.context !== "{}" || Object.keys(field.context || {}).length;
+                        const index = hasFieldContext ? seenByModel : defaultContextNames;
+                        if (!index.has(field.relation)) {
+                            index.set(field.relation, new Map());
+                        }
+                        const candidates = index.get(field.relation);
+                        values.forEach((value) => candidates.set(value.id, value));
                     }
                 }
             }
+        }
+        for (const [resModel, values] of seenByModel) {
+            this.offlinePlugin.cacheMany2XSearch(resModel, [...values.values()]);
+        }
+        for (const [resModel, values] of defaultContextNames) {
+            this.offlinePlugin.cacheMany2XSearch(resModel, [...values.values()], defaultScope);
         }
     }
 
@@ -345,12 +443,17 @@ export class RelationalModel extends Model {
         return new this.constructor.DynamicRecordList(this, config, data);
     }
 
-    _getCacheParams(config, rootLoadProm) {
+    _getCacheParams(config, rootLoadProm, onRefresh = () => {}) {
         if (!this.withCache) {
             return;
         }
         const firstLoad = !this.isReady();
         const currentResId = config.resId;
+        const recordSaveVersion = this._recordSaveVersion;
+        const defaultScope = JSON.stringify([
+            [],
+            { ...user.context, ...getFieldBaseContext(config.context) },
+        ]);
         // Do not use a cached result if we're online and this isn't the first load of the model,
         // except if we're loading another record (form view) or creating a new record (onchange).
         const noCache =
@@ -368,8 +471,13 @@ export class RelationalModel extends Model {
                     // The record ID has been changed, likely because a new record was saved.
                     return;
                 }
-                this._cacheMany2X(config, result);
+                this._cacheMany2X(config, result, defaultScope);
+                // A completed inline save can leave the root and load IDs unchanged.
+                if (!root.config.isMonoRecord && recordSaveVersion !== this._recordSaveVersion) {
+                    return;
+                }
                 if (!hasChanged) {
+                    onRefresh();
                     return;
                 }
                 if (root.id !== this.root.id) {
@@ -409,22 +517,36 @@ export class RelationalModel extends Model {
                     }
                     root._setData(result[0], { keepChanges: true });
                     this.hooks.onRootUpdated(this.root);
+                    onRefresh();
                     return;
                 }
 
-                // multi record case: either grouped or ungrouped
-                if (root.config.groupBy.length) {
-                    if (firstLoad) {
-                        // result is the response of a web_read_group rpc
-                        // in case there're less groups, we don't want to keep displaying groups
-                        // that are no longer there => forget previous groups
-                        // only delete if it's the first load of the model
-                        delete root.config.currentGroups;
-                    }
-                    result = await this._postprocessReadGroup(root.config, result);
+                // Refreshes replace row objects. Keep the saved page if a row is being edited.
+                if (root.editedRecord) {
+                    return;
                 }
-                root._setData(result);
-                this.hooks.onRootUpdated(this.root);
+                await this.mutex.exec(async () => {
+                    const canRefresh = () =>
+                        root.id === this.root.id &&
+                        loadId === root.config.loadId &&
+                        recordSaveVersion === this._recordSaveVersion &&
+                        !root.editedRecord;
+                    if (!canRefresh()) {
+                        return;
+                    }
+                    if (root.config.groupBy.length) {
+                        if (firstLoad) {
+                            // Forget saved groups that are no longer present in the server response.
+                            delete root.config.currentGroups;
+                        }
+                        result = await this._postprocessReadGroup(root.config, result);
+                    }
+                    if (canRefresh()) {
+                        root._setData(result);
+                        this.hooks.onRootUpdated(this.root);
+                        onRefresh();
+                    }
+                });
             },
         };
     }

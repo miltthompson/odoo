@@ -135,8 +135,10 @@ export class DynamicGroupList extends DynamicList {
 
     async selectDomain(value) {
         return this.model.mutex.exec(async () => {
-            await this._ensureCorrectRecordCount();
-            this._selectDomain(value);
+            if (!value || !this.model.hasOfflineSearch) {
+                await this._ensureCorrectRecordCount();
+                this._selectDomain(value);
+            }
         });
     }
 
@@ -435,7 +437,7 @@ export class DynamicGroupList extends DynamicList {
     }
 
     async _toggleSelection() {
-        if (!this.records.length) {
+        if (!this.records.length && !this.model.hasOfflineSearch) {
             // all groups are folded, so there's no visible records => select all domain
             if (!this.isDomainSelected) {
                 await this._ensureCorrectRecordCount();

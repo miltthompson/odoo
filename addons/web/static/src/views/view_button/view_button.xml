@@ -12,6 +12,7 @@
         t-att-href="this.props.tag === 'a' and '#'"
         t-att-style="this.props.style"
         t-att-type="this.clickParams.type"
+        t-att-data-offline-reason="this.props.attrs?.['data-offline-reason'] || this.offlineReason()"
         t-att-data-tooltip-template="this.hasBigTooltip ? 'views.ViewButtonTooltip' : false"
         t-att-data-tooltip-info="this.hasBigTooltip ? this.tooltip : false"
         t-att-data-tooltip="this.hasSmallToolTip ? this.props.title : false"

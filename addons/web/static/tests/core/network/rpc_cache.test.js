@@ -178,6 +178,42 @@ test("PersistentCache: can cache a simple call", async () => {
     expect(rpcCache.ramCache.ram.table.key.expires).toBe(new_timestamp + DEFAULT_MAX_AGE);
 });
 
+test("slow reads display the saved timestamp then refresh in place", async () => {
+    const cache = new RPCCache("mockRpc", 1, "00".repeat(32));
+    freezeTime();
+    const savedAt = Date.now();
+    const read = (fallback, settings = {}) => cache.read("table", "key", fallback, {
+        type: "disk",
+        update: "always",
+        ...settings,
+    });
+    await read(async () => ({ name: "saved" }));
+    await microTick();
+    await advanceTime(1000);
+    const requestedAt = Date.now();
+    const network = Promise.withResolvers();
+    const freshness = [];
+    const result = read(() => network.promise, {
+        staleAfter: 600,
+        onFreshness: (value) => freshness.push(value),
+        callback: (value, changed) => expect.step([value.name, changed]),
+    });
+    await advanceTime(599);
+    expect(freshness).toEqual([]);
+    await advanceTime(1);
+    expect(await result).toEqual({ name: "saved" });
+    expect(freshness).toEqual([{ timestamp: savedAt, fromCache: true }]);
+    network.resolve({ name: "fresh" });
+    await microTick();
+    expect.verifySteps([["fresh", true]]);
+    expect(freshness).toEqual([
+        { timestamp: savedAt, fromCache: true },
+        { timestamp: requestedAt, fromCache: false },
+    ]);
+    const freshResult = await read(async () => ({ name: "fast" }), { staleAfter: 600 });
+    expect(freshResult).toEqual({ name: "fast" });
+});
+
 test("invalidate table", async () => {
     const rpcCache = new RPCCache(
         "mockRpc",

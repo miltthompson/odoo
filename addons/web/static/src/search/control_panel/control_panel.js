@@ -169,7 +169,21 @@ export class ControlPanel extends Component {
         );
     }
 
+    offlineViewReason(view) {
+        if (this.isViewAvailable(view)) {
+            return false;
+        }
+        return ["kanban", "list", "form"].includes(view.type)
+            ? _t("This view isn't saved on this device.")
+            : _t("This view needs a connection.");
+    }
+
     switchView(viewType, newWindow) {
+        const reason = this.offlinePlugin.isOffline() && this.offlineViewReason({ type: viewType });
+        if (reason) {
+            this.offlinePlugin.explainUnavailable(reason);
+            return;
+        }
         this.actionService.switchView(viewType, {}, { newWindow });
     }
 

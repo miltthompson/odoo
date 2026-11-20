@@ -17,6 +17,7 @@ import { ControlPanel } from "@web/search/control_panel/control_panel";
 import { WebClient } from "@web/webclient/webclient";
 import { Dropdown } from "@web/core/dropdown/dropdown";
 import { DropdownItem } from "@web/core/dropdown/dropdown_item";
+import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { listView } from "@web/views/list/list_view";
 import { registry } from "@web/core/registry";
 
@@ -37,6 +38,20 @@ test("simple rendering", async () => {
     expect(`.o_control_panel_navigation > *`).toHaveCount(0);
     expect(`.o_cp_switch_buttons`).toHaveCount(0);
     expect(`.o_breadcrumb`).toHaveCount(1);
+});
+
+test("the offline controls explanation stays visible until reconnecting", async () => {
+    await mountWithSearch(ControlPanel, { resModel: "foo" });
+    const offline = getService(OfflinePlugin);
+    expect(".o_offline_control_note").toHaveCount(0);
+
+    offline.setOffline(true);
+    await animationFrame();
+    expect(".o_offline_control_note").toHaveText("Greyed-out actions need a connection");
+
+    offline.setOffline(false);
+    await animationFrame();
+    expect(".o_offline_control_note").toHaveCount(0);
 });
 
 test.tags("desktop");

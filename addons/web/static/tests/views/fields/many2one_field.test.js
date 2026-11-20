@@ -416,6 +416,53 @@ test("[Offline] many2one", async () => {
     await expect.waitForSteps(["web_save"]); // We sync when the connection returns
 });
 
+test("offline many2one results stay in their domain and context and are not reused online", async () => {
+    const setOffline = mockOffline();
+    let picker;
+    let saved;
+    patchWithCleanup(Many2XAutocomplete.prototype, {
+        setup() {
+            super.setup();
+            picker = this;
+        },
+    });
+    patchWithCleanup(OfflinePlugin.prototype, {
+        cacheMany2XSearch(...args) {
+            saved = super.cacheMany2XSearch(...args);
+            return saved;
+        },
+    });
+    onRpc("web_name_search", ({ kwargs }) => {
+        expect.step(kwargs.name);
+    });
+    await mountView({
+        resModel: "partner",
+        type: "form",
+        arch: `<form><field name="trululu" domain="[('id', '=', 2)]" context="{'active_test': False}"/></form>`,
+    });
+    const online = await picker.memoizedSearch("record");
+    await saved;
+    expect(online.map((result) => result.id)).toEqual([2]);
+    await setOffline(true);
+    expect((await picker.memoizedSearch("rec")).map((result) => result.id)).toEqual([2]);
+    expect(await picker.search("rec", [["id", "=", 1]], { active_test: false })).toEqual([]);
+    expect(await picker.search("rec", [["id", "=", 2]], { active_test: true })).toEqual([]);
+
+    const resume = Promise.withResolvers();
+    patchWithCleanup(OfflinePlugin.prototype, {
+        async searchMany2XRecords(...args) {
+            await resume.promise;
+            return super.searchMany2XRecords(...args);
+        },
+    });
+    const local = picker.memoizedSearch("reco");
+    await setOffline(false);
+    resume.resolve();
+    await local;
+    await picker.memoizedSearch("reco");
+    expect.verifySteps(["record", "reco"]);
+});
+
 test("[Offline] many2one autopopulated", async () => {
     const setOffline = mockOffline();
 
@@ -423,6 +470,7 @@ test("[Offline] many2one autopopulated", async () => {
         resModel: "partner",
         type: "form",
         arch: `<form> <field name="trululu"/> </form>`,
+        context: { default_type: "opportunity", search_default_team_id: 1 },
         resIds: [1, 2, 4],
         resId: 1,
     });

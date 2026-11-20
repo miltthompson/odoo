@@ -14,14 +14,23 @@ import { NonSecureContextError } from "@web/core/errors/non_secure_context_error
 import { _t } from "@web/core/l10n/translation";
 import { normalize } from "@web/core/l10n/utils";
 import { ConnectionLostError, rpc, rpcBus } from "@web/core/network/rpc";
+import { NotificationPlugin } from "@web/core/notifications/notification_plugin";
 import { ORM } from "@web/core/orm_plugin";
 import { registry } from "@web/core/registry";
 import { services } from "@web/core/services";
+import { uniqueId } from "@web/core/utils/functions";
 import { IndexedDB } from "@web/core/utils/indexed_db";
 import { hashCode } from "@web/core/utils/strings";
 import { session } from "@web/session";
 
 const IS_READY = Symbol("ready");
+const MANY2X_SCAN_LIMIT = 1000;
+const OFFLINE_NOTICE_INTERVAL = 500;
+const OFFLINE_POINTER_EVENTS = ["pointerdown", "click"];
+const GUARDED_EVENTS = [
+    "auxclick", "dblclick", "keydown", "keyup", "keypress", "pointerup",
+    "mousedown", "mouseup", "touchstart", "touchend", "submit",
+];
 
 class FakeIndexedDB {
     // used in non secure context to disable the offline features as data can't be encrypted
@@ -45,9 +54,16 @@ export class OfflinePlugin extends Plugin {
     static ORM_SYNC_TABLE_NAME = "orm-to-sync";
     static MANY2X_TABLE_PREFIX = "many2x_";
 
-    static SELECTORS_TO_DISABLE = ["button:not([data-available-offline]):not([disabled])"];
+    static SELECTORS_TO_DISABLE = [
+        "button:not([data-available-offline]):not([disabled])",
+        "[data-offline-reason]:not([data-available-offline]):not([disabled])",
+    ];
 
     debugMode = usePlugin(DebugModePlugin);
+    notification = usePlugin(NotificationPlugin);
+    _gatedControls = new Map();
+    _offlineDescriptions = new Map();
+    _offlineNotice = null;
     orm = usePlugin(ORM);
 
     _idb = window.isSecureContext
@@ -77,7 +93,12 @@ export class OfflinePlugin extends Plugin {
     /** items available offline (only populated when offline) */
     _visited = signal.Object({ [IS_READY]: null });
 
+    _onOfflineActivation = (ev) => this._guardOfflineActivation(ev);
+
     setup() {
+        // Guard clicks before views register capture handlers that may save inline edits.
+        useListener(window, "click", this._onOfflineActivation, { capture: true });
+
         // Use "offline" and "online" events for instant detection of connection lost/restored.
         useListener(browser, "offline", () => {
             if (!this.isOffline()) {
@@ -140,7 +161,11 @@ export class OfflinePlugin extends Plugin {
         this.isOffline.set(offline);
         this._visited.set({});
         if (offline) {
-            // Disable everything in the UI that isn't marked as available offline.
+            // Guard newly rendered controls too, before the observer has added their attributes.
+            for (const type of GUARDED_EVENTS) {
+                window.addEventListener(type, this._onOfflineActivation, true);
+            }
+            document.addEventListener("pointerdown", this._onOfflineActivation, true);
             this._offlineUI();
             // Create an observer instance linked to the callback function to keep disabling
             // elements that would appear in the DOM while being offline.
@@ -152,7 +177,7 @@ export class OfflinePlugin extends Plugin {
             this._observer.observe(document.body, {
                 childList: true, // listen for direct children being added/removed
                 subtree: true, // also observe descendants (not just direct children)
-                attributeFilter: ["data-available-offline"], // listen for specific attribute change
+                attributeFilter: ["data-available-offline", "data-offline-reason", "disabled"],
             });
 
             // Repeatedly check if connection is back.
@@ -294,30 +319,60 @@ export class OfflinePlugin extends Plugin {
     // Many2X Offline
     // -------------------------------------------------------------------------
 
-    async cacheMany2XSearch(resModel, result) {
-        if (!this._crypto) {
+    async cacheMany2XSearch(resModel, result, scope) {
+        if (!this._crypto || !result.length) {
             return;
         }
         const tableName = OfflinePlugin.MANY2X_TABLE_PREFIX + resModel;
         const values = await this._encryptAndFormat(result);
-        this._idb.write(tableName, values);
+        const write = this._idb.write(tableName, values);
+        if (scope !== undefined) {
+            const scopeKey = await this._many2XScopeKey(scope);
+            await this._idb.write(
+                `${OfflinePlugin.MANY2X_TABLE_PREFIX}search:${resModel}`,
+                values.map(({ key, value }) => ({
+                    key: `${scopeKey}:${String(key).padStart(16, "0")}`,
+                    value,
+                }))
+            );
+        }
+        await write;
     }
 
-    async searchMany2XRecords(resModel, name) {
-        if (!this._crypto) {
-            return;
+    async searchMany2XRecords(resModel, name, scope) {
+        if (!this._crypto || scope === undefined) {
+            return [];
         }
 
-        const normalizeSearch = normalize(name);
-        const _searchFn = !normalizeSearch
-            ? () => true
-            : async (value) => {
-                  const decryptedValue = normalize(await this._crypto.decrypt(value));
-                  return decryptedValue.includes(normalizeSearch);
-              };
-        const tableName = OfflinePlugin.MANY2X_TABLE_PREFIX + resModel;
-        const res = await this._idb.search(tableName, _searchFn);
-        return this._decryptAndFormat(res);
+        const query = normalize(name);
+        const labels = new Map();
+        const tableName = `${OfflinePlugin.MANY2X_TABLE_PREFIX}search:${resModel}`;
+        const scopeKey = await this._many2XScopeKey(scope);
+        const prefix = `${scopeKey}:`;
+        // Match only keys starting with the scope followed by ':'.
+        const keyRange = IDBKeyRange.bound(prefix, `${scopeKey};`, false, true);
+        const results = await this._idb.search(tableName, async (value) => {
+            try {
+                const label = await this._crypto.decrypt(value);
+                if (typeof label === "string" && normalize(label).includes(query)) {
+                    labels.set(value, label);
+                    return true;
+                }
+            } catch {
+                // A saved entry encrypted with a previous key is not available.
+            }
+            return false;
+        }, 8, MANY2X_SCAN_LIMIT, keyRange);
+        return (results || []).map(({ key, value }) => ({
+            id: Number(key.slice(prefix.length)),
+            display_name: labels.get(value),
+        }));
+    }
+
+    async _many2XScopeKey(scope) {
+        // Keep field domains and context out of plaintext IndexedDB keys.
+        const digest = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(scope));
+        return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
     }
 
     async readMany2XRecords(resModel, resIds) {
@@ -337,8 +392,14 @@ export class OfflinePlugin extends Plugin {
      * @private
      */
     _cleanup() {
-        this._onlineUI();
         this._observer?.disconnect();
+        for (const type of GUARDED_EVENTS) {
+            window.removeEventListener(type, this._onOfflineActivation, true);
+        }
+        document.removeEventListener("pointerdown", this._onOfflineActivation, true);
+        this._offlineNotice?.close();
+        this._offlineNotice = null;
+        this._onlineUI();
         browser.clearTimeout(this._timeout);
     }
 
@@ -406,27 +467,151 @@ export class OfflinePlugin extends Plugin {
      * @private
      */
     _offlineUI() {
-        // Re-enable elements that have been marked as available offline
-        document.querySelectorAll(".o_disabled_offline[data-available-offline]").forEach((el) => {
-            el.removeAttribute("disabled");
-            el.classList.remove("o_disabled_offline");
-        });
-        document.querySelectorAll(OfflinePlugin.SELECTORS_TO_DISABLE.join(", ")).forEach((el) => {
-            el.setAttribute("disabled", "");
+        const selector = OfflinePlugin.SELECTORS_TO_DISABLE.join(", ");
+        for (const [el, state] of this._gatedControls) {
+            const native = !el.hasAttribute("data-offline-reason");
+            if (
+                !el.isConnected ||
+                el.hasAttribute("data-available-offline") ||
+                state.native !== native ||
+                (!state.native && (!el.matches(selector) || state.reason !== this._offlineReason(el)))
+            ) {
+                this._restoreOfflineControl(el, state);
+            }
+        }
+        for (const el of document.querySelectorAll(selector)) {
+            if (this._gatedControls.has(el)) {
+                continue;
+            }
+            const reason = this._offlineReason(el);
+            // Generic buttons keep native disabling. A reason attribute opts into focusable gating.
+            const native = !el.hasAttribute("data-offline-reason");
+            const ariaDisabled = el.getAttribute("aria-disabled");
+            const describedBy = el.getAttribute("aria-describedby");
+            const hadClass = el.classList.contains("o_disabled_offline");
+            const description = this._getOfflineDescription(reason);
+            const tooltip = ["data-tooltip", "data-tooltip-template", "title"].map((name) =>
+                [name, el.getAttribute(name)]
+            );
+            this._gatedControls.set(el, { native, reason, ariaDisabled, description, hadClass, tooltip });
+            el.setAttribute("aria-describedby", [describedBy, description].filter(Boolean).join(" "));
+            el.setAttribute("data-tooltip", reason);
+            el.setAttribute("title", reason);
+            el.removeAttribute("data-tooltip-template");
             el.classList.add("o_disabled_offline");
-        });
+            if (native) {
+                el.setAttribute("disabled", "");
+            } else {
+                el.setAttribute("aria-disabled", "true");
+            }
+        }
     }
 
-    /**
-     * Re-enables elements that have previously been disabled by @_offlineUI.
-     *
-     * @private
-     */
-    _onlineUI() {
-        document.querySelectorAll(".o_disabled_offline").forEach((el) => {
+    _offlineReason(el) {
+        return el.dataset.offlineReason || String(_t("Needs a connection"));
+    }
+
+    _getOfflineDescription(reason) {
+        if (!this._offlineDescriptions.has(reason)) {
+            const description = document.createElement("span");
+            description.id = uniqueId("o_offline_reason_");
+            description.hidden = true;
+            description.textContent = reason;
+            document.body.append(description);
+            this._offlineDescriptions.set(reason, description);
+        }
+        return this._offlineDescriptions.get(reason).id;
+    }
+
+    _guardOfflineActivation(ev) {
+        if (!this.isOffline()) {
+            return;
+        }
+        const keyboard = ev.type.startsWith("key");
+        if (keyboard && !["Enter", " "].includes(ev.key)) {
+            return;
+        }
+        const target = ev.submitter || ev.target;
+        let control = target.closest?.("button, [data-offline-reason]") ||
+            (ev.type === "submit" ? target.querySelector('button[type="submit"], button:not([type])') : null);
+        if (OFFLINE_POINTER_EVENTS.includes(ev.type) && ev instanceof MouseEvent &&
+            (ev.type === "pointerdown" || ev.detail > 0)) {
+            // A browser can retarget events on disabled buttons. Only use the top hit,
+            // so a button behind an overlay can't intercept a click on that overlay.
+            const hit = document.elementsFromPoint(ev.clientX, ev.clientY)[0]?.closest(".o_disabled_offline");
+            if (this._gatedControls.get(hit)?.native) {
+                control = hit;
+            }
+        }
+        if (!control || control.hasAttribute("data-available-offline")) {
+            return;
+        }
+        if (!this._gatedControls.has(control) && !control.matches(OfflinePlugin.SELECTORS_TO_DISABLE.join(", "))) {
+            return;
+        }
+        ev.stopImmediatePropagation();
+        if (keyboard || ["pointerdown", "click", "auxclick", "dblclick", "submit"].includes(ev.type)) {
+            ev.preventDefault();
+        }
+        if (["pointerdown", "click", "auxclick", "submit"].includes(ev.type) ||
+            (ev.type === "keydown" && !ev.repeat)) {
+            this.explainUnavailable(this._offlineReason(control));
+        }
+    }
+
+    explainUnavailable(reason = _t("Needs a connection")) {
+        const now = Date.now();
+        const notice = this._offlineNotice;
+        if (notice?.reason === String(reason) && now - notice.at < OFFLINE_NOTICE_INTERVAL) {
+            return;
+        }
+        notice?.close();
+        this._offlineNotice = {
+            reason: String(reason),
+            at: now,
+            close: this.notification.add(reason, { type: "info" }),
+        };
+    }
+
+    _restoreOfflineControl(el, state) {
+        this._gatedControls.delete(el);
+        if (state.native) {
             el.removeAttribute("disabled");
+        } else if (state.ariaDisabled === null) {
+            el.removeAttribute("aria-disabled");
+        } else {
+            el.setAttribute("aria-disabled", state.ariaDisabled);
+        }
+        for (const [name, value] of state.tooltip) {
+            const offlineValue = name === "data-tooltip-template" ? null : state.reason;
+            if (el.getAttribute(name) !== offlineValue) {
+                continue; // The component has since supplied its own tooltip.
+            }
+            if (value === null) {
+                el.removeAttribute(name);
+            } else {
+                el.setAttribute(name, value);
+            }
+        }
+        const ids = el.getAttribute("aria-describedby")?.split(/\s+/).filter((id) => id !== state.description);
+        if (ids?.length) {
+            el.setAttribute("aria-describedby", ids.join(" "));
+        } else {
+            el.removeAttribute("aria-describedby");
+        }
+        if (!state.hadClass) {
             el.classList.remove("o_disabled_offline");
-        });
+        }
+    }
+
+    _onlineUI() {
+        for (const [el, state] of this._gatedControls) {
+            this._restoreOfflineControl(el, state);
+        }
+        for (const description of this._offlineDescriptions.values()) {
+            description.remove();
+        }
+        this._offlineDescriptions.clear();
     }
 
     // -------------------------------------------------------------------------

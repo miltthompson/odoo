@@ -18,6 +18,7 @@ import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { ORM } from "@web/core/orm_plugin";
 import { evaluateBooleanExpr } from "@web/core/py_js/py";
 import { SIZES } from "@web/core/ui/ui_utils";
+import { user } from "@web/core/user";
 import { KeepLast } from "@web/core/utils/concurrency";
 import { useBus, useOwnedDialogs, useService } from "@web/core/utils/hooks";
 import { highlightText, odoomark } from "@web/core/utils/html";
@@ -228,6 +229,7 @@ export class Many2XAutocomplete extends Component {
 
     props = useProps(many2XAutocompleteProps);
     autocompleteContainerRef = signal.ref();
+    offlineSearchResults = new WeakSet();
 
     setup() {
         this.orm = useService("orm");
@@ -350,9 +352,19 @@ export class Many2XAutocomplete extends Component {
     }
 
     async search(name, domain, context) {
+        const { resModel } = this.props;
+        const scope = JSON.stringify([domain, { ...user.context, ...context }]);
+        const searchSaved = async () => {
+            const records = await this.offlinePlugin.searchMany2XRecords(resModel, name, scope);
+            this.offlineSearchResults.add(records);
+            return records;
+        };
+        if (this.offlinePlugin.isOffline()) {
+            return searchSaved();
+        }
         let result;
         try {
-            result = await this.orm.call(this.props.resModel, "web_name_search", [], {
+            result = await this.orm.call(resModel, "web_name_search", [], {
                 name,
                 operator: "ilike",
                 domain,
@@ -362,22 +374,25 @@ export class Many2XAutocomplete extends Component {
             });
         } catch (e) {
             if (e instanceof ConnectionLostError) {
-                return this.offlinePlugin.searchMany2XRecords(this.props.resModel, name);
+                return searchSaved();
             }
             throw e;
         }
-        this.offlinePlugin.cacheMany2XSearch(this.props.resModel, result);
+        this.offlinePlugin.cacheMany2XSearch(resModel, result, scope);
         return result;
     }
 
     async memoizedSearch(name) {
         const domain = this.props.getDomain();
         const context = this.props.context;
+        const fullContext = { ...user.context, ...context };
+        const offline = this.offlinePlugin.isOffline();
         if (
             !this.props.preventMemoization &&
             this.previousSearch &&
+            this.previousSearch.offline === offline &&
             deepEqual(this.previousSearch.domain, domain) &&
-            deepEqual(this.previousSearch.context, context)
+            deepEqual(this.previousSearch.context, fullContext)
         ) {
             if (this.previousSearch.name === name) {
                 return this.previousSearch.records;
@@ -392,10 +407,11 @@ export class Many2XAutocomplete extends Component {
         }
         const records = await this.search(name, domain, context);
         this.previousSearch = {
-            context,
+            context: fullContext,
             domain,
             name,
             records,
+            offline: offline || this.offlineSearchResults.has(records),
         };
         return records;
     }
@@ -533,7 +549,9 @@ export class Many2XAutocomplete extends Component {
         return {
             cssClass: "o_m2o_no_result",
             data: { slotName: "noRecordsItem" },
-            label: _t("No records"),
+            label: this.offlinePlugin.isOffline()
+                ? _t("No matching records found on this device")
+                : _t("No records"),
         };
     }
 

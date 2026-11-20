@@ -7,7 +7,7 @@
                 <span t-if="this.isDomainSelected">All <b><t t-out="this.nbTotal"/><t t-if="this.hasLimitedCount">+</t></b> selected</span>
                 <t t-else="">
                     <b t-out="this.nbSelected"/> selected
-                    <button t-if="!this.uiService.isSmall and this.isPageSelected and (!this.isRecordCountTrustable or this.nbTotal > this.nbSelected)"
+                    <button t-if="!this.uiService.isSmall and !this.root.model.hasOfflineSearch and this.isPageSelected and (!this.isRecordCountTrustable or this.nbTotal > this.nbSelected)"
                         class="o_select_domain btn btn-sm btn-info p-1 ms-2 me-n2 border-0 fw-normal"
                         title="Select all records matching the search"
                         t-on-click="this.onSelectDomain">
@@ -19,7 +19,7 @@
                     <i class="oi" data-icon="close_small"/>
                 </button>
             </span>
-            <button t-if="this.uiService.isSmall and !this.isDomainSelected and (!this.isRecordCountTrustable or this.nbTotal > this.nbSelected)"
+            <button t-if="this.uiService.isSmall and !this.root.model.hasOfflineSearch and !this.isDomainSelected and (!this.isRecordCountTrustable or this.nbTotal > this.nbSelected)"
                 class="o_select_domain btn btn-info shadow"
                 title="Select all records matching the search"
                 t-on-click="this.onSelectDomain">

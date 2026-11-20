@@ -211,7 +211,7 @@
             <t t-if="this.displayRowCreates and this.props.editable === 'top'">
                 <t t-call="{{ this.constructor.createRowTemplate }}"/>
             </t>
-            <t t-foreach="list.records" t-as="record" t-key="record.id">
+            <t t-foreach="list.model.filterOfflineRecords(list.records)" t-as="record" t-key="record.id">
                 <t t-call="{{ this.constructor.recordRowTemplate }}"/>
             </t>
             <t t-if="this.displayRowCreates and this.props.editable !== 'top'">

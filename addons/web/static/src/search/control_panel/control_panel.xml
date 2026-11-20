@@ -83,7 +83,10 @@
                                     <t t-foreach="this.env.config.viewSwitcherEntries" t-as="view" t-key="view.type">
                                         <DropdownItem 
                                             tag="'button'"
-                                            attrs="{ 'data-available-offline': this.isViewAvailable(view)}"
+                                            attrs="{
+                                                'data-available-offline': this.isViewAvailable(view),
+                                                'data-offline-reason': this.offlineViewReason(view),
+                                            }"
                                             onSelected="() => this.switchView(view.type)"
                                             class="{ 'selected': view.active }">
                                                 <i class="oi oi-fw" t-att-data-icon="view.icon"/>
@@ -99,7 +102,8 @@
                                     t-att-class="{ 'active': view.active }"
                                     t-attf-class="o_{{view.type}}"
                                     t-att-data-available-offline="this.isViewAvailable(view)"
-                                    t-att-data-tooltip="view.name"
+                                    t-att-data-offline-reason="this.offlineViewReason(view)"
+                                    t-att-data-tooltip="this.offlineViewReason(view) || view.name"
                                     t-custom-click="(ev, isMiddleClick) => this.switchView(view.type, isMiddleClick)"
                                     t-att-aria-label="view.name + ' View'"
                                 >
@@ -110,6 +114,9 @@
                     </t>
                     <t t-call-slot="control-panel-navigation-additional"/>
                 </div>
+            </div>
+            <div t-if="this.offlinePlugin.isOffline()" class="o_offline_control_note small text-muted d-print-none">
+                Greyed-out actions need a connection
             </div>
         </div>
     </t>

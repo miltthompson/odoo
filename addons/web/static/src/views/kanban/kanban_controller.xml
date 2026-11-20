@@ -71,14 +71,15 @@
                 </t>
                 <t t-set-slot="control-panel-actions">
                     <SearchBar t-if="!this.offlinePlugin.isOffline()" toggler="this.searchBarToggler" autofocus="this.firstLoad"/>
-                    <OfflineSearchBar t-else="" toggler="this.searchBarToggler" autofocus="this.firstLoad"/>
+                    <OfflineSearchBar t-else="" toggler="this.searchBarToggler" autofocus="this.firstLoad" model="this.model"/>
                 </t>
                 <t t-set-slot="control-panel-navigation-additional">
                     <t t-if="!this.hasSelectedRecords">
-                        <t t-if="this.offlinePlugin.isOffline()" t-component="this.searchBarToggler.offlineComponent" t-props="this.searchBarToggler.props"/>
+                        <t t-if="this.offlinePlugin.isOffline()" t-component="this.searchBarToggler.offlineComponent" t-props="this.searchBarToggler.props" canSearchSavedRecords="this.model.isReady()"/>
                         <t t-else="" t-component="this.searchBarToggler.component" t-props="this.searchBarToggler.props"/>
                     </t>
                 </t>
+                <t t-call="web.OfflineFreshness"/>
                 <t t-component="this.props.Renderer" t-if="this.model.isReady()"
                     list="this.model.root"
                     archInfo="this.props.archInfo"

@@ -156,14 +156,22 @@ export class KanbanRecord extends CardRenderer {
         if (this.props.record.selected) {
             classes.push("o_record_selected");
         }
-        if (
-            this.offlinePlugin.isOffline() &&
-            !this.props.record.model.useSampleModel &&
-            !this.offlinePlugin.isAvailableOffline(this.env.config.actionId, "form", record.resId)
-        ) {
+        if (this.offlineOpenReason()) {
             classes.push("o_disabled_offline");
         }
         return classes.join(" ");
+    }
+
+    offlineOpenReason() {
+        const { record, forceGlobalClick, openAction } = this.props;
+        if (!this.offlinePlugin.isOffline() || record.model.useSampleModel) {
+            return false;
+        }
+        if (!forceGlobalClick && openAction) {
+            return _t("This action needs a connection.");
+        }
+        return !this.offlinePlugin.isAvailableOffline(this.env.config.actionId, "form", record.resId) &&
+            _t("This record isn't saved on this device.");
     }
 
     /**
@@ -230,6 +238,11 @@ export class KanbanRecord extends CardRenderer {
             ev.preventDefault();
             this.rootRef().focus();
             this.props.toggleSelection(this.props.record, ev.shiftKey);
+            return;
+        }
+        const reason = this.offlineOpenReason();
+        if (reason) {
+            this.offlinePlugin.explainUnavailable(reason);
             return;
         }
         const { forceGlobalClick, canOpenRecords, openAction, openRecord, record } = this.props;

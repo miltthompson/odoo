@@ -310,24 +310,27 @@ export function extractFieldsFromArchInfo({ fieldNodes, widgetNodes }, fields) {
     return { activeFields, fields };
 }
 
-export function getFieldContext(
-    record,
-    fieldName,
-    rawContext = record.activeFields[fieldName].context
-) {
+export function getFieldBaseContext(recordContext) {
     const context = {};
-    for (const key in record.context) {
+    for (const key in recordContext) {
         if (
             !key.startsWith("default_") &&
             !key.startsWith("search_default_") &&
             !key.endsWith("_view_ref")
         ) {
-            context[key] = record.context[key];
+            context[key] = recordContext[key];
         }
     }
+    return context;
+}
 
+export function getFieldContext(
+    record,
+    fieldName,
+    rawContext = record.activeFields[fieldName].context
+) {
     return {
-        ...context,
+        ...getFieldBaseContext(record.context),
         ...record.fields[fieldName].context,
         ...makeContext([rawContext], record.evalContext),
     };

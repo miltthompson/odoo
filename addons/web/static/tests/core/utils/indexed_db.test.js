@@ -197,6 +197,27 @@ for (const VERSION of ["REAL", "MOCK"]) {
         await ensureDbIsAbsent();
     });
 
+    test(`${VERSION} - search scans only bounded keys in the requested range`, async () => {
+        onError(() => deleteCacheDB());
+        const db = new IDB(CACHE_NAME, 1);
+        await db.write("mytable", [
+            { key: "before:1", value: "match" },
+            { key: "scope:1", value: "skip" },
+            { key: "scope:2", value: "match" },
+            { key: "scope:3", value: "match" },
+            { key: "scope;1", value: "match" },
+        ]);
+        const range = IDBKeyRange.bound("scope:", "scope;", false, true);
+        const search = (scanLimit) => db.search("mytable", (value) => value === "match", 8, scanLimit, range);
+        expect(await search(2)).toEqual([{ key: "scope:2", value: "match" }]);
+        expect(await search(10)).toEqual([
+            { key: "scope:2", value: "match" },
+            { key: "scope:3", value: "match" },
+        ]);
+        await db.deleteDatabase();
+        await ensureDbIsAbsent();
+    });
+
     test(`${VERSION} - one cache, invalidate`, async () => {
         onError(() => deleteCacheDB());
         await ensureDbIsAbsent();

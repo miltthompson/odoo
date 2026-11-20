@@ -376,6 +376,16 @@ export class ListController extends Component {
     }
 
     async openRecord(record, { force, newWindow } = { force: false }) {
+        if (this.offlinePlugin.isOffline()) {
+            if (this.props.allowOpenAction && this.archInfo.openAction) {
+                this.offlinePlugin.explainUnavailable();
+                return;
+            }
+            if (!this.offlinePlugin.isAvailableOffline(this.env.config.actionId, "form", record.resId)) {
+                this.offlinePlugin.explainUnavailable(_t("This record isn't saved on this device."));
+                return;
+            }
+        }
         const dirty = await record.isDirty();
         if (dirty) {
             await record.save();

@@ -18,6 +18,7 @@ import {
     getDropdownMenu,
     getService,
     models,
+    mockOffline,
     mockService,
     mountView,
     mountWithCleanup,
@@ -27,6 +28,7 @@ import {
     pagerPrevious,
 } from "@web/../tests/web_test_helpers";
 import { EventBus } from "@odoo/owl";
+import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { range } from "@web/core/utils/numbers";
 import { WebClient } from "@web/webclient/webclient";
 import { patch } from "@web/core/utils/patch";
@@ -156,6 +158,37 @@ test("[Offline] static statusbar widget on many2one field", async () => {
     expect(".o_statusbar_status button:not(.dropdown-toggle)").toHaveCount(1);
     expect(".o_statusbar_status button:disabled:not(.d-none)").toHaveCount(1);
     expect('.o_statusbar_status button[data-value="4"]').toHaveClass("o_arrow_button_current");
+});
+
+test.tags("desktop");
+test("an opted-in statusbar can change to a saved stage while offline", async () => {
+    const setOffline = mockOffline();
+    await mountView({
+        type: "form",
+        resModel: "partner",
+        resId: 1,
+        arch: `<form><header><field name="trululu" widget="statusbar"
+            options="{'clickable': True, 'available_offline': True}"/></header></form>`,
+    });
+    await setOffline(true);
+    await contains('.o_statusbar_status button[data-value="2"]').click();
+    expect('.o_statusbar_status button[data-value="2"]').toHaveClass("o_arrow_button_current");
+});
+
+test.tags("desktop");
+test("an opted-in statusbar cannot change stage without saved options", async () => {
+    onRpc("partner", "search_read", () => new Response("", { status: 502 }));
+    await mountView({
+        type: "form",
+        resModel: "partner",
+        resId: 1,
+        arch: `<form><header><field name="trululu" widget="statusbar"
+            options="{'clickable': True, 'available_offline': True}"/></header></form>`,
+    });
+    getService(OfflinePlugin).setOffline(true);
+    await animationFrame();
+    expect(".o_statusbar_status button[data-available-offline]").toHaveCount(0);
+    expect('.o_statusbar_status button[data-value="4"]:disabled').toHaveCount(1);
 });
 
 test("folded statusbar widget on selection field has selected value in the toggler", async () => {
