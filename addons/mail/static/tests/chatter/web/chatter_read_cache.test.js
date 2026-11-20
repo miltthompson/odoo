@@ -176,10 +176,12 @@ test("offline chatter restores notes and activities with explained unavailable c
     expect(updated.messages.data["mail.message"].find(({ id }) => id === editedId).body[1]).toInclude(
         "Quote accepted"
     );
-    // Simulate re-opening in a fresh mail store without relying on the warm in-memory thread.
+    // Evict the records too: a cache containing only IDs must not be able to restore the UI.
+    for (const record of [...thread.messages, ...thread.activities]) {
+        record.delete();
+    }
+    expect(store["mail.message"].get(noteId)).toBe(undefined);
     thread.hasLoadedChatterActivities = false;
-    thread.messages = [];
-    thread.activities = [];
     thread.isLoaded = false;
 
     await setOffline(true);
