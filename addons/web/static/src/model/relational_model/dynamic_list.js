@@ -443,6 +443,7 @@ export class DynamicList extends DataPoint {
             this.model._updateConfig(editedRecord.config, { mode: "readonly" }, { reload: false });
             throw e;
         }
+        this.model._recordSaveVersion++;
         const serverValuesById = Object.fromEntries(records.map((record) => [record.id, record]));
         for (const record of validRecords) {
             const serverValues = serverValuesById[record.resId];
@@ -503,6 +504,7 @@ export class DynamicList extends DataPoint {
             undoFns.forEach((undo) => undo());
             throw e;
         }
+        this.model._recordSaveVersion++;
         const valuesById = Object.fromEntries(values.map((vals) => [vals.id, vals]));
         const missing = records.filter((record) => !(record.resId in valuesById));
         if (missing.length) {

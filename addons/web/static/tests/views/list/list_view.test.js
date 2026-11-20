@@ -21203,6 +21203,55 @@ for (const save of [false, true]) {
     });
 }
 
+for (const programmatic of [false, true]) {
+    test.tags("desktop");
+    test(`a slow list refresh preserves a completed ${programmatic ? "programmatic bulk save" : "multi-edit"}`, async () => {
+        let model;
+        let response;
+        patchWithCleanup(ListController.prototype, {
+            setup() {
+                super.setup();
+                model = this.model;
+            },
+        });
+        onRpc("web_search_read", async ({ parent }) => {
+            if (response) {
+                const result = await parent();
+                result.records[0].foo = "server snapshot before the save";
+                await response.promise;
+                expect.step("server snapshot returned");
+                return result;
+            }
+        });
+        await mountView({
+            resModel: "foo",
+            type: "list",
+            arch: `<list multi_edit="1"><field name="foo"/></list>`,
+        });
+        response = Promise.withResolvers();
+        const load = model.load();
+        await advanceTime(600);
+        await load;
+        if (programmatic) {
+            const list = model.root;
+            await model.mutex.exec(() => list._saveRecords(list.records.slice(0, 2), { foo: "bulk edit" }));
+        } else {
+            await contains(".o_data_row:eq(0) .o_list_record_selector input").click();
+            await contains(".o_data_row:eq(1) .o_list_record_selector input").click();
+            await contains(".o_data_cell[name='foo']").click();
+            await contains(".o_selected_row [name='foo'] input").edit("bulk edit");
+            await contains(".modal .btn-primary").click();
+        }
+        await animationFrame();
+        const savedRows = () => queryAllTexts(".o_data_cell[name='foo']").slice(0, 2);
+        expect(savedRows()).toEqual(["bulk edit", "bulk edit"]);
+        response.resolve();
+        await expect.waitForSteps(["server snapshot returned"]);
+        await animationFrame();
+        expect(savedRows()).toEqual(["bulk edit", "bulk edit"]);
+    });
+}
+
 test.tags("desktop");
 test("clicking an unavailable action does not save the edited list row offline", async () => {
     const setOffline = mockOffline();
