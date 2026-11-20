@@ -183,12 +183,14 @@ const saveBundle = async (request, response, descriptor) => {
 
 const readCachedBundle = async (request, descriptor) => {
     const cache = await caches.open(bundleCacheName);
-    const cached = await cache.match(request);
     if (!descriptor) {
-        return cached;
+        return cache.match(request);
     }
     const latestCache = await caches.open(bundleDescriptorCacheName);
+    // The writer saves the fallback before publishing a replacement. Read the
+    // latest first so a concurrent publish cannot hide the usable fallback.
     const latest = await latestCache.match(request);
+    const cached = await cache.match(request);
     // Prefer the latest descriptor only when all requested files are cached,
     // or when there is no earlier usable descriptor for this request.
     if (latest && (!cached || (await hasBundleFiles(cache, request, await latest.clone().json())))) {
