@@ -21,7 +21,7 @@
 
 <t t-name="web.Many2XAutocomplete" >
     <div class="o_input_dropdown" t-ref="this.autocompleteContainerRef">
-        <input t-if="this.uiService.isSmall and this.props.dropdown"
+        <input t-if="this.uiService.isSmall and this.props.dropdown and !this.offlinePlugin.isOffline()"
             type="text"
             t-att-id="this.props.id"
             class="o_input"
@@ -40,6 +40,9 @@
             </t>
         </AutoComplete>
         <span class="o_dropdown_button" />
+        <small t-if="this.offlinePlugin.isOffline()" class="text-body-secondary d-block">
+            Only items saved on this device. Creating or searching for more needs a connection.
+        </small>
     </div>
 </t>
 

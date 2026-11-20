@@ -1,9 +1,11 @@
 // @ts-check
 
-import { EventBus, markRaw, usePlugin, toRaw } from "@odoo/owl";
+import { EventBus, markRaw, signal, usePlugin, toRaw } from "@odoo/owl";
 import { makeContext } from "@web/core/context";
 import { Domain } from "@web/core/domain";
 import { WarningDialog } from "@web/core/errors/error_dialogs";
+import { _t } from "@web/core/l10n/translation";
+import { normalize } from "@web/core/l10n/utils";
 import { ConnectionLostError } from "@web/core/network/rpc";
 import { shallowEqual } from "@web/core/utils/arrays";
 import { KeepLast, Mutex } from "@web/core/utils/concurrency";
@@ -128,6 +130,44 @@ export class RelationalModel extends Model {
     static withCache = true;
 
     offlinePlugin = usePlugin(OfflinePlugin);
+    dataFreshness = signal(null);
+    offlineSearch = signal("");
+
+    offlineFreshnessText() {
+        const freshness = this.dataFreshness();
+        const offline = this.offlinePlugin.isOffline();
+        if (!freshness || (!offline && !freshness.fromCache) || this.useSampleModel) {
+            return "";
+        }
+        const relative = luxon.DateTime.fromMillis(freshness.timestamp).toRelative();
+        return offline
+            ? _t("Offline: saved on this device %s", relative)
+            : _t("Saved on this device %s", relative);
+    }
+
+    filterOfflineRecords(records) {
+        const query = this.offlinePlugin.isOffline() && this.offlineSearch();
+        if (!query) {
+            return records;
+        }
+        const matches = (text) => typeof text === "string" && normalize(text).includes(query);
+        return records.filter(({ data, fields }) =>
+            Object.keys(data).some((name) => {
+                const value = data[name];
+                switch (fields[name]?.type) {
+                    case "char":
+                    case "text":
+                        return matches(value);
+                    case "many2one":
+                        return matches(value?.display_name);
+                    case "many2many":
+                        return value?.records?.some((record) => matches(record.data.display_name));
+                    default:
+                        return false;
+                }
+            })
+        );
+    }
 
     /**
      * @param {RelationalModelParams} params
@@ -218,6 +258,18 @@ export class RelationalModel extends Model {
         this.hooks.onWillLoadRoot(config);
         const { promise, resolve } = Promise.withResolvers();
         const cache = this._getCacheParams(config, promise);
+        let freshness = null;
+        if (cache && (config.isMonoRecord ? config.resId : !config.resIds)) {
+            Object.assign(cache, {
+                staleAfter: this.offlinePlugin.isOffline() ? 0 : 600,
+                onFreshness: (value) => {
+                    freshness = value;
+                    if (this.config.loadId === config.loadId) {
+                        this.dataFreshness.set(value);
+                    }
+                },
+            });
+        }
         let data;
         try {
             data = await this.keepLast.add(this._loadData(config, cache));
@@ -232,6 +284,7 @@ export class RelationalModel extends Model {
         this.root = this._createRoot(config, data);
         resolve({ root: this.root, loadId: config.loadId });
         this.config = config;
+        this.dataFreshness.set(freshness);
         await this.hooks.onRootLoaded(this.root);
     }
 

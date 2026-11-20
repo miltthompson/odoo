@@ -403,8 +403,12 @@ export class KanbanRenderer extends Component {
                     key: isNull(group.value) ? `group_key_${i}` : String(group.value),
                 }));
         } else {
-            return list.records.map((record) => ({ record, key: record.id }));
+            return this.filterOfflineRecords(list).map((record) => ({ record, key: record.id }));
         }
+    }
+
+    filterOfflineRecords(list) {
+        return list.model.filterOfflineRecords(list.records);
     }
 
     /**

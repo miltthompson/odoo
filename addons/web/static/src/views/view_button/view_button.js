@@ -2,6 +2,7 @@ import { Component, t, usePlugin, useProps } from "@odoo/owl";
 import { DebugModePlugin } from "@web/core/debug_mode_plugin";
 import { useDropdownCloser } from "@web/core/dropdown/dropdown_hooks";
 import { _t } from "@web/core/l10n/translation";
+import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { pick } from "@web/core/utils/objects";
 import { debounce as debounceFn } from "@web/core/utils/timing";
 import { useViewButtonHandler } from "@web/views/view_button/view_button_hook";
@@ -54,6 +55,7 @@ export class ViewButton extends Component {
     props = useProps(viewButtonProps);
 
     debugMode = usePlugin(DebugModePlugin);
+    offlinePlugin = usePlugin(OfflinePlugin);
     handleViewButton = useViewButtonHandler();
 
     setup() {
@@ -107,6 +109,13 @@ export class ViewButton extends Component {
     get disabled() {
         const { name, type, special } = this.clickParams;
         return (!name && !type && !special) || this.props.disabled;
+    }
+
+    offlineReason() {
+        if (this.offlinePlugin.isOffline() && ["action", "object"].includes(this.clickParams.type)) {
+            return _t("This action needs a connection.");
+        }
+        return false;
     }
 
     /**

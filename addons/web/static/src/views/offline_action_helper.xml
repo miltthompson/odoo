@@ -6,6 +6,7 @@
             <div class="o_nocontent_help">
                 <p><i class="oi oi-4x opacity-75" data-icon="link_off"/></p>
                 <p>There is no data to display offline for the given filters</p>
+                <p>This isn't saved on this device. It will load when you're back online.</p>
                 <button
                     t-if="this.searches.length"
                     class="btn btn-primary"
@@ -15,6 +16,11 @@
                 </button>   
             </div>
         </div>
+    </t>
+
+    <t t-name="web.OfflineFreshness">
+        <t t-set="freshness" t-value="this.model.offlineFreshnessText()"/>
+        <p t-if="freshness" class="o_offline_freshness text-body-secondary small mx-3 mt-2 mb-0" role="status" t-out="freshness"/>
     </t>
 
 </templates>

@@ -1,5 +1,7 @@
 import { IDBQuotaExceededError, IndexedDB } from "@web/core/utils/indexed_db";
+import { browser } from "../browser/browser";
 import { router } from "../browser/router";
+import { ConnectionLostError } from "./rpc";
 import { deepCopy } from "../utils/objects";
 import { Crypto, CRYPTO_ALGO } from "../crypto";
 
@@ -27,6 +29,9 @@ export function isRPCCacheDisabled() {
  *                  // Defines the validity of a new entry created by this call.
  *                  // On read, the entry is checked against last stored expiry time; if expired, it is ignored.
  * noCache?: boolean;
+ * staleAfter?: number; // For reads: wait this many milliseconds for the network before using a saved copy.
+ *                     // A lost connection uses the saved copy immediately, if there is one.
+ * onFreshness?: (freshness: { timestamp: number, fromCache: boolean }) => void;
  * }} RPCCacheSettings
  */
 
@@ -113,40 +118,73 @@ export class RPCCache {
             update = "once",
             maxAge = ONE_YEAR,
             noCache = false,
+            staleAfter,
+            onFreshness = () => {},
         } = {}
     ) {
         validateSettings({ type, update });
-
-        const ramEntry = !noCache ? this.ramCache.read(table, key) : null;
-        const isExpired = ramEntry?.expires && ramEntry?.expires < Date.now();
-        let ramValue = !isExpired ? ramEntry?.data : null;
-
+        const networkFirst = staleAfter !== undefined;
         const requestKey = `${table}/${key}`;
         const pendingRequest = this.pendingRequests[requestKey];
         if (pendingRequest) {
             if (!noCache) {
-                // never do the same call multiple times in parallel => return the same value for all
-                // those calls, but store their callback to call them when/if the real value is obtained
+                // Share both the result and its provenance with callers of the same pending RPC.
                 pendingRequest.callbacks.push(callback);
-                return ramValue.then((result) => deepCopy(result));
-            } else {
-                pendingRequest.invalidated = true;
+                pendingRequest.freshnessCallbacks.push(onFreshness);
+                if (pendingRequest.freshness) {
+                    onFreshness(pendingRequest.freshness);
+                }
+                return pendingRequest.result.then((result) => deepCopy(result));
             }
+            pendingRequest.invalidated = true;
         }
 
-        if (!ramValue || update === "always") {
-            const request = { callbacks: [callback], invalidated: false };
+        const ramEntry = (!noCache || (networkFirst && !pendingRequest))
+            ? this.ramCache.read(table, key)
+            : null;
+        const isExpired = ramEntry?.expires && ramEntry?.expires < Date.now();
+        let ramValue = !isExpired ? ramEntry?.data : null;
+
+        if (noCache || !ramValue || update === "always") {
+            const request = {
+                callbacks: [callback],
+                freshnessCallbacks: [onFreshness],
+                invalidated: false,
+            };
             this.pendingRequests[requestKey] = request;
             const now = Date.now();
 
             // execute the fallback and write the result in the caches
             const prom = new Promise((resolve, reject) => {
                 const fromCache = Promise.withResolvers();
-                let fromCacheValue;
+                let savedEntry;
+                let usedSavedEntry = false;
+                let networkDone = false;
+                let canUseSavedEntry = !networkFirst;
+                const setFreshness = (timestamp, fromCache) => {
+                    request.freshness = { timestamp, fromCache };
+                    request.freshnessCallbacks.forEach((cb) => cb(request.freshness));
+                };
+                const useSavedEntry = () => {
+                    if (savedEntry && canUseSavedEntry && !networkDone && !usedSavedEntry && !request.invalidated) {
+                        usedSavedEntry = true;
+                        resolve(savedEntry.data);
+                        setFreshness(savedEntry.timestamp, true);
+                    }
+                };
+                const timer = networkFirst && browser.setTimeout(() => {
+                    canUseSavedEntry = true;
+                    useSavedEntry();
+                }, staleAfter);
                 const onFullfilled = (result) => {
+                    networkDone = true;
+                    if (networkFirst) {
+                        browser.clearTimeout(timer);
+                    }
                     resolve(result);
+                    setFreshness(now, false);
                     // call the pending request callbacks with the result
-                    const hasChanged = !!fromCacheValue && !jsonEqual(fromCacheValue, result);
+                    const hasChanged = usedSavedEntry && !jsonEqual(savedEntry.data, result);
                     request.callbacks.forEach((cb) => cb(deepCopy(result), hasChanged));
                     if (request.invalidated) {
                         return result;
@@ -177,18 +215,30 @@ export class RPCCache {
                     return result;
                 };
                 const onRejected = async (error) => {
+                    if (networkFirst) {
+                        browser.clearTimeout(timer);
+                        canUseSavedEntry = error instanceof ConnectionLostError;
+                    }
                     await fromCache.promise;
+                    useSavedEntry();
+                    networkDone = true;
                     if (!request.invalidated) {
                         delete this.pendingRequests[requestKey];
-                        if (!fromCacheValue) {
-                            this.ramCache.delete(table, key); // remove rejected prom from ram cache
+                        if (usedSavedEntry) {
+                            this.ramCache.write(table, key, {
+                                ...savedEntry,
+                                data: Promise.resolve(savedEntry.data),
+                            });
+                        } else {
+                            this.ramCache.delete(table, key);
                         }
                     }
-                    if (fromCacheValue) {
-                        // promise has already been fullfilled with the cached value
+                    if (usedSavedEntry) {
+                        // The view keeps its saved copy; report the error through the existing handlers.
                         throw error;
+                    } else {
+                        reject(error);
                     }
-                    reject(error);
                 };
                 fallback().then(onFullfilled, onRejected);
 
@@ -199,15 +249,15 @@ export class RPCCache {
                     // been removed from the ram cache if it had been rejected
                     // => no need to define a `catch` callback.
                     ramValue.then((value) => {
-                        resolve(value);
-                        fromCacheValue = value;
+                        savedEntry = { ...ramEntry, data: value };
+                        useSavedEntry();
                         fromCache.resolve();
                     });
-                } else if (type === "disk" && !noCache) {
+                } else if (type === "disk" && (!noCache || networkFirst)) {
                     this.indexedDB
                         .read(table, key)
                         .then(async (result) => {
-                            if (result) {
+                            if (result && !networkDone) {
                                 if (result.expires < now) {
                                     return;
                                 }
@@ -219,17 +269,20 @@ export class RPCCache {
                                     // The data will be updated with the new cryptoKey.
                                     return;
                                 }
-                                resolve(decrypted);
-                                fromCacheValue = decrypted;
+                                savedEntry = { ...result, data: decrypted };
+                                useSavedEntry();
                             }
                         })
-                        .finally(() => fromCache.resolve());
+                        .then(fromCache.resolve, fromCache.resolve);
                 } else {
                     fromCache.resolve(); // fromCacheValue will remain undefined
                 }
             });
+            request.result = prom;
             this.ramCache.write(table, key, { data: prom, timestamp: now, expires: now + maxAge });
             ramValue = prom;
+        } else {
+            onFreshness({ timestamp: ramEntry.timestamp, fromCache: true });
         }
 
         return ramValue.then((result) => deepCopy(result));

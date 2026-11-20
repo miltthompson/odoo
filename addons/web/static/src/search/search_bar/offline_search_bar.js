@@ -1,12 +1,13 @@
 import { onWillRender } from "@web/owl2/utils";
 import { useAutofocus, useService } from "@web/core/utils/hooks";
-import { Component, onWillStart, usePlugin, proxy, signal, t, useProps } from "@odoo/owl";
+import { Component, onWillStart, onWillUnmount, usePlugin, proxy, signal, t, useProps } from "@odoo/owl";
 import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { Dropdown } from "@web/core/dropdown/dropdown";
 import { useDropdownState } from "@web/core/dropdown/dropdown_hooks";
 import { DropdownItem } from "@web/core/dropdown/dropdown_item";
 import { fuzzyLookup } from "@web/core/utils/search";
 import { useHotkey } from "@web/core/hotkeys/hotkey_hook";
+import { normalize } from "@web/core/l10n/utils";
 
 const INITIAL_SEARCH_LIMIT = 8;
 
@@ -18,6 +19,7 @@ export class OfflineSearchBar extends Component {
     };
     props = useProps({
         autofocus: t.boolean().optional(),
+        model: t.object().optional(),
         toggler: t.object().optional(),
     });
 
@@ -46,6 +48,8 @@ export class OfflineSearchBar extends Component {
             limit: INITIAL_SEARCH_LIMIT,
         });
 
+        this.localQuery = signal("");
+        onWillUnmount(() => this.props.model?.offlineSearch.set(""));
         const offlinePlugin = usePlugin(OfflinePlugin);
         onWillStart(async () => {
             const { actionId, viewType } = this.env.config;
@@ -87,6 +91,13 @@ export class OfflineSearchBar extends Component {
         }
     }
 
+    onLocalSearchInput(ev) {
+        if (!ev.isComposing) {
+            this.localQuery.set(ev.target.value);
+            this.props.model.offlineSearch.set(normalize(ev.target.value.trim()));
+        }
+    }
+
     onRemoveSearch() {
         this.selectSearch(this.emptySearch || this.allSearches[0]);
     }
@@ -105,6 +116,10 @@ export class OfflineSearchBar extends Component {
         } else {
             this.searchBarDropdownState.open();
         }
+    }
+
+    onCompositionEnd(ev) {
+        this.onSearchInput(ev);
     }
 
     onSelect(search) {

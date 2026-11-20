@@ -62,14 +62,15 @@ export class IndexedDB {
      * @param {string} table The name of the table to search.
      * @param {Function} searchFn The function used to match records (async).
      * @param {number} limit The maximum number of results to return.
+     * @param {number} scanLimit The maximum number of entries to examine.
      * @returns {Promise<any>} The matching records.
      */
-    async search(table, searchFn, limit = 8) {
+    async search(table, searchFn, limit = 8, scanLimit = Infinity) {
         this._tables.add(table);
         return this.mutex.exec(() =>
             this._execute((db) => {
                 if (db) {
-                    return this._search(db, table, searchFn, limit);
+                    return this._search(db, table, searchFn, limit, scanLimit);
                 }
             })
         );
@@ -365,23 +366,23 @@ export class IndexedDB {
         });
     }
 
-    async _search(db, table, searchFn, limit) {
+    async _search(db, table, searchFn, limit, scanLimit) {
         const results = [];
-        let query = null; // Start with no range (fetch from the beginning)
-
-        // Start first I/O fetch immediately
-        let nextBatchPromise = this._getAllEntries(db, table, query, BATCH_SIZE);
+        let remaining = scanLimit;
+        let batchSize = Math.min(BATCH_SIZE, remaining);
+        let nextBatchPromise = this._getAllEntries(db, table, null, batchSize);
 
         // eslint-disable-next-line no-constant-condition
         while (true) {
             const records = await nextBatchPromise;
 
-            // Pre-fetch next batch while CPU processes current one (Pipeline)
-            if (records.length === BATCH_SIZE) {
-                query = IDBKeyRange.lowerBound(records.at(-1).key, true);
-                nextBatchPromise = this._getAllEntries(db, table, query, BATCH_SIZE);
-            } else {
-                nextBatchPromise = Promise.resolve([]);
+            // Pre-fetch the next batch while processing the current one.
+            remaining -= records.length;
+            const hasMore = records.length === batchSize && remaining > 0;
+            if (hasMore) {
+                const query = IDBKeyRange.lowerBound(records.at(-1).key, true);
+                batchSize = Math.min(BATCH_SIZE, remaining);
+                nextBatchPromise = this._getAllEntries(db, table, query, batchSize);
             }
 
             for (const record of records) {
@@ -393,8 +394,7 @@ export class IndexedDB {
                 }
             }
 
-            // Stop if we reached the end of the table
-            if (records.length < BATCH_SIZE) {
+            if (!hasMore) {
                 return results;
             }
         }

@@ -5,6 +5,7 @@
         <t t-foreach="items" t-as="item" t-key="item.value">
             <DropdownItem
                 class="this.getDropdownItemClassNames(item)"
+                attrs="{'data-available-offline': this.canSelectOffline()}"
                 onSelected="() => this.selectItem(item)"
             >
                 <span t-out="item.label" />
@@ -17,6 +18,7 @@
             <Dropdown position="'bottom-end'">
                 <button
                     t-ref="this.afterRef"
+                    t-att-data-available-offline="this.canSelectOffline()"
                     type="button"
                     class="btn btn-secondary dropdown-toggle o_arrow_button o_first"
                     t-att-disabled="this.props.isDisabled"
@@ -38,6 +40,7 @@
                             o_arrow_button_current: item.isSelected,
                             o_last: item_last,
                         }"
+                        t-att-data-available-offline="this.canSelectOffline()"
                         t-att-disabled="this.props.isDisabled || item.isSelected"
                         role="radio"
                         t-att-aria-checked="item.isSelected.toString()"
@@ -51,6 +54,7 @@
             <Dropdown position="'bottom-start'">
                 <button
                     t-ref="this.beforeRef"
+                    t-att-data-available-offline="this.canSelectOffline()"
                     type="button"
                     class="btn btn-secondary dropdown-toggle o_arrow_button o_last"
                     t-att-disabled="this.props.isDisabled"
@@ -67,6 +71,7 @@
                 <t t-set="selectedIndex" t-value="allItems.findIndex((item) => item.isSelected)" />
                 <button
                     t-ref="this.dropdownRef"
+                    t-att-data-available-offline="this.canSelectOffline()"
                     type="button"
                     class="btn btn-secondary dropdown-toggle"
                     t-att-class="{'o_arrow_button': this.uiService.isSmall, 'o_last': selectedIndex === 0 , 'o_first': selectedIndex === allItems.length - 1}"

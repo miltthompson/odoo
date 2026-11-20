@@ -1,10 +1,11 @@
 import { onWillRender, render } from "@web/owl2/utils";
-import { Component, signal, t, onMounted, onPatched, useListener, useProps } from "@odoo/owl";
+import { Component, signal, t, onMounted, onPatched, useListener, usePlugin, useProps } from "@odoo/owl";
 import { useCommand } from "@web/core/commands/command_hook";
 import { Domain } from "@web/core/domain";
 import { Dropdown } from "@web/core/dropdown/dropdown";
 import { DropdownItem } from "@web/core/dropdown/dropdown_item";
 import { _t } from "@web/core/l10n/translation";
+import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { registry } from "@web/core/registry";
 import { useThrottleForAnimation } from "@web/core/utils/timing";
 import { getFieldDomain } from "@web/model/relational_model/utils";
@@ -20,6 +21,7 @@ import { useService } from "@web/core/utils/hooks";
  *  isDisabled?: boolean;
  *  visibleSelection?: string[];
  *  withCommand?: boolean;
+ *  availableOffline?: boolean;
  * }} StatusBarFieldProps
  *
  * @typedef StatusBarItem
@@ -58,7 +60,11 @@ export class StatusBarField extends Component {
         visibleSelection: t.array(t.string()).optional(),
         withCommand: t.boolean().optional(),
         context: t.object().optional(),
+        availableOffline: t.boolean().optional(),
     });
+
+    offlinePlugin = usePlugin(OfflinePlugin);
+    hasSavedItems = signal(false);
 
     beforeRef = signal.ref();
     rootRef = signal.ref();
@@ -115,17 +121,17 @@ export class StatusBarField extends Component {
                 }
                 let domain = getFieldDomain(record, fieldName, props.domain);
                 domain = Domain.and([this.getDomain(props), domain]).toList();
-                const res = await orm
-                    .searchRead(relation, domain, fieldNames, { context })
-                    .catch((error) => {
-                        if (error instanceof ConnectionLostError) {
-                            if (this.props.record.data[this.props.name]) {
-                                return [this.props.record.data[this.props.name]];
-                            }
-                            return [];
-                        }
+                let res;
+                try {
+                    res = await orm.searchRead(relation, domain, fieldNames, { context });
+                    this.hasSavedItems.set(!!res.length);
+                } catch (error) {
+                    if (!(error instanceof ConnectionLostError)) {
                         throw error;
-                    });
+                    }
+                    this.hasSavedItems.set(false);
+                    res = record.data[fieldName] ? [record.data[fieldName]] : [];
+                }
                 forceRecomputeItems = true;
                 return res;
             });
@@ -151,7 +157,7 @@ export class StatusBarField extends Component {
                 {
                     category: "smart_action",
                     hotkey: "alt+shift+x",
-                    isAvailable: () => !this.props.isDisabled,
+                    isAvailable: () => this.canSelect(),
                 }
             );
             useCommand(
@@ -165,7 +171,7 @@ export class StatusBarField extends Component {
                     category: "smart_action",
                     hotkey: "alt+x",
                     isAvailable: () => {
-                        if (this.props.isDisabled) {
+                        if (!this.canSelect()) {
                             return false;
                         }
                         const items = this.getAllItems();
@@ -325,6 +331,14 @@ export class StatusBarField extends Component {
         }
     }
 
+    canSelectOffline() {
+        return this.props.availableOffline && (this.field.type === "selection" || this.hasSavedItems());
+    }
+
+    canSelect() {
+        return !this.props.isDisabled && (!this.offlinePlugin.isOffline() || this.canSelectOffline());
+    }
+
     getCurrentLabel() {
         return this.getAllItems().find((item) => item.isSelected)?.label || _t("More");
     }
@@ -337,7 +351,7 @@ export class StatusBarField extends Component {
         if (item.isSelected) {
             classNames.push("active");
         }
-        if (item.isSelected || this.props.isDisabled) {
+        if (item.isSelected || !this.canSelect()) {
             classNames.push("disabled");
         }
         return classNames.join(" ");
@@ -359,6 +373,9 @@ export class StatusBarField extends Component {
      * @param {StatusBarItem} item
      */
     async selectItem(item) {
+        if (!this.canSelect() || !item || item.isSelected) {
+            return;
+        }
         const { name, record } = this.props;
         const value =
             this.field.type === "many2one"
@@ -386,6 +403,11 @@ export const statusBarField = {
             default: true,
         },
         {
+            label: _t("Available offline"),
+            name: "available_offline",
+            type: "boolean",
+        },
+        {
             label: _t("Fold field"),
             name: "fold_field",
             type: "field",
@@ -404,6 +426,7 @@ export const statusBarField = {
         foldField: options.fold_field,
         domain: dynamicInfo.domain,
         context: dynamicInfo.context,
+        availableOffline: !!options.available_offline,
     }),
 };
 

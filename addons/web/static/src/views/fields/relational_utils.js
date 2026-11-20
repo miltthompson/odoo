@@ -350,6 +350,9 @@ export class Many2XAutocomplete extends Component {
     }
 
     async search(name, domain, context) {
+        if (this.offlinePlugin.isOffline()) {
+            return this.offlinePlugin.searchMany2XRecords(this.props.resModel, name);
+        }
         let result;
         try {
             result = await this.orm.call(this.props.resModel, "web_name_search", [], {
@@ -376,6 +379,7 @@ export class Many2XAutocomplete extends Component {
         if (
             !this.props.preventMemoization &&
             this.previousSearch &&
+            this.previousSearch.offline === this.offlinePlugin.isOffline() &&
             deepEqual(this.previousSearch.domain, domain) &&
             deepEqual(this.previousSearch.context, context)
         ) {
@@ -396,6 +400,7 @@ export class Many2XAutocomplete extends Component {
             domain,
             name,
             records,
+            offline: this.offlinePlugin.isOffline(),
         };
         return records;
     }
@@ -533,7 +538,9 @@ export class Many2XAutocomplete extends Component {
         return {
             cssClass: "o_m2o_no_result",
             data: { slotName: "noRecordsItem" },
-            label: _t("No records"),
+            label: this.offlinePlugin.isOffline()
+                ? _t("No matching records found on this device")
+                : _t("No records"),
         };
     }
 

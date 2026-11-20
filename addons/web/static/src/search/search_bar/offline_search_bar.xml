@@ -60,6 +60,12 @@
                     </DropdownItem>
                 </t>
             </Dropdown>
+            <label t-if="this.props.model and this.props.model.isReady()" class="d-flex flex-column w-100 gap-1 mt-2">
+                <span class="small text-body-secondary">Searching saved records on this page only. New filters need a connection.</span>
+                <input type="search" class="o_offline_record_search form-control py-2" placeholder="Search saved records..."
+                    t-att-value="this.localQuery()" t-on-input="this.onLocalSearchInput" t-on-compositionend="this.onLocalSearchInput"/>
+            </label>
+            <p t-else="" class="small text-body-secondary mt-2 mb-0">Search needs a saved view or a connection.</p>
         </div>
     </t>
 

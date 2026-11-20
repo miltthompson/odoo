@@ -37,7 +37,7 @@
                                     context="group.context"
                                 />
                             </t>
-                            <t t-foreach="group.list.records" t-as="record" t-key="record.id">
+                            <t t-foreach="this.filterOfflineRecords(group.list)" t-as="record" t-key="record.id">
                                 <KanbanRecord
                                     archInfo="this.props.archInfo.cardArchInfo"
                                     Compiler="this.props.Compiler"

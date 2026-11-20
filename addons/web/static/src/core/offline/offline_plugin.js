@@ -14,14 +14,21 @@ import { NonSecureContextError } from "@web/core/errors/non_secure_context_error
 import { _t } from "@web/core/l10n/translation";
 import { normalize } from "@web/core/l10n/utils";
 import { ConnectionLostError, rpc, rpcBus } from "@web/core/network/rpc";
+import { NotificationPlugin } from "@web/core/notifications/notification_plugin";
 import { ORM } from "@web/core/orm_plugin";
 import { registry } from "@web/core/registry";
 import { services } from "@web/core/services";
+import { uniqueId } from "@web/core/utils/functions";
 import { IndexedDB } from "@web/core/utils/indexed_db";
 import { hashCode } from "@web/core/utils/strings";
 import { session } from "@web/session";
 
 const IS_READY = Symbol("ready");
+const MANY2X_SCAN_LIMIT = 1000;
+const GUARDED_EVENTS = [
+    "click", "auxclick", "dblclick", "keydown", "keyup", "keypress",
+    "pointerdown", "pointerup", "mousedown", "mouseup", "touchstart", "touchend", "submit",
+];
 
 class FakeIndexedDB {
     // used in non secure context to disable the offline features as data can't be encrypted
@@ -45,9 +52,15 @@ export class OfflinePlugin extends Plugin {
     static ORM_SYNC_TABLE_NAME = "orm-to-sync";
     static MANY2X_TABLE_PREFIX = "many2x_";
 
-    static SELECTORS_TO_DISABLE = ["button:not([data-available-offline]):not([disabled])"];
+    static SELECTORS_TO_DISABLE = [
+        "button:not([data-available-offline]):not([disabled])",
+        "[data-offline-reason]:not([data-available-offline]):not([disabled])",
+    ];
 
     debugMode = usePlugin(DebugModePlugin);
+    notification = usePlugin(NotificationPlugin);
+    _gatedControls = new Map();
+    _offlineDescriptions = new Map();
     orm = usePlugin(ORM);
 
     _idb = window.isSecureContext
@@ -76,6 +89,8 @@ export class OfflinePlugin extends Plugin {
 
     /** items available offline (only populated when offline) */
     _visited = signal.Object({ [IS_READY]: null });
+
+    _onOfflineActivation = (ev) => this._guardOfflineActivation(ev);
 
     setup() {
         // Use "offline" and "online" events for instant detection of connection lost/restored.
@@ -140,7 +155,10 @@ export class OfflinePlugin extends Plugin {
         this.isOffline.set(offline);
         this._visited.set({});
         if (offline) {
-            // Disable everything in the UI that isn't marked as available offline.
+            // Guard newly rendered controls too, before the observer has added their attributes.
+            for (const type of GUARDED_EVENTS) {
+                window.addEventListener(type, this._onOfflineActivation, true);
+            }
             this._offlineUI();
             // Create an observer instance linked to the callback function to keep disabling
             // elements that would appear in the DOM while being offline.
@@ -152,7 +170,7 @@ export class OfflinePlugin extends Plugin {
             this._observer.observe(document.body, {
                 childList: true, // listen for direct children being added/removed
                 subtree: true, // also observe descendants (not just direct children)
-                attributeFilter: ["data-available-offline"], // listen for specific attribute change
+                attributeFilter: ["data-available-offline", "data-offline-reason", "disabled"],
             });
 
             // Repeatedly check if connection is back.
@@ -305,19 +323,28 @@ export class OfflinePlugin extends Plugin {
 
     async searchMany2XRecords(resModel, name) {
         if (!this._crypto) {
-            return;
+            return [];
         }
 
-        const normalizeSearch = normalize(name);
-        const _searchFn = !normalizeSearch
-            ? () => true
-            : async (value) => {
-                  const decryptedValue = normalize(await this._crypto.decrypt(value));
-                  return decryptedValue.includes(normalizeSearch);
-              };
+        const query = normalize(name);
+        const labels = new Map();
         const tableName = OfflinePlugin.MANY2X_TABLE_PREFIX + resModel;
-        const res = await this._idb.search(tableName, _searchFn);
-        return this._decryptAndFormat(res);
+        const results = await this._idb.search(tableName, async (value) => {
+            try {
+                const label = await this._crypto.decrypt(value);
+                if (typeof label === "string" && normalize(label).includes(query)) {
+                    labels.set(value, label);
+                    return true;
+                }
+            } catch {
+                // A saved entry encrypted with a previous key is not available.
+            }
+            return false;
+        }, 8, MANY2X_SCAN_LIMIT);
+        return (results || []).map(({ key, value }) => ({
+            id: Number(key),
+            display_name: labels.get(value),
+        }));
     }
 
     async readMany2XRecords(resModel, resIds) {
@@ -337,8 +364,11 @@ export class OfflinePlugin extends Plugin {
      * @private
      */
     _cleanup() {
-        this._onlineUI();
         this._observer?.disconnect();
+        for (const type of GUARDED_EVENTS) {
+            window.removeEventListener(type, this._onOfflineActivation, true);
+        }
+        this._onlineUI();
         browser.clearTimeout(this._timeout);
     }
 
@@ -406,27 +436,114 @@ export class OfflinePlugin extends Plugin {
      * @private
      */
     _offlineUI() {
-        // Re-enable elements that have been marked as available offline
-        document.querySelectorAll(".o_disabled_offline[data-available-offline]").forEach((el) => {
-            el.removeAttribute("disabled");
-            el.classList.remove("o_disabled_offline");
-        });
-        document.querySelectorAll(OfflinePlugin.SELECTORS_TO_DISABLE.join(", ")).forEach((el) => {
-            el.setAttribute("disabled", "");
+        const selector = OfflinePlugin.SELECTORS_TO_DISABLE.join(", ");
+        for (const [el, state] of this._gatedControls) {
+            if (
+                !el.isConnected ||
+                el.hasAttribute("data-available-offline") ||
+                (state.native && el.hasAttribute("data-offline-reason")) ||
+                (!state.native && (!el.matches(selector) || state.reason !== this._offlineReason(el)))
+            ) {
+                this._restoreOfflineControl(el, state);
+            }
+        }
+        for (const el of document.querySelectorAll(selector)) {
+            if (this._gatedControls.has(el)) {
+                continue;
+            }
+            const reason = this._offlineReason(el);
+            // Legacy standalone clients keep native disabling unless they supply a reason.
+            const native = !el.closest(".o_web_client, .o_action_manager, .o_dialog") &&
+                !el.hasAttribute("data-offline-reason");
+            const ariaDisabled = el.getAttribute("aria-disabled");
+            const describedBy = el.getAttribute("aria-describedby");
+            const hadClass = el.classList.contains("o_disabled_offline");
+            const description = this._getOfflineDescription(reason);
+            this._gatedControls.set(el, { native, reason, ariaDisabled, description, hadClass });
+            el.setAttribute("aria-disabled", "true");
+            el.setAttribute("aria-describedby", [describedBy, description].filter(Boolean).join(" "));
             el.classList.add("o_disabled_offline");
-        });
+            if (native) {
+                el.setAttribute("disabled", "");
+            }
+        }
     }
 
-    /**
-     * Re-enables elements that have previously been disabled by @_offlineUI.
-     *
-     * @private
-     */
-    _onlineUI() {
-        document.querySelectorAll(".o_disabled_offline").forEach((el) => {
+    _offlineReason(el) {
+        return el.dataset.offlineReason || String(_t("This action needs a connection."));
+    }
+
+    _getOfflineDescription(reason) {
+        if (!this._offlineDescriptions.has(reason)) {
+            const description = document.createElement("span");
+            description.id = uniqueId("o_offline_reason_");
+            description.hidden = true;
+            description.textContent = reason;
+            document.body.append(description);
+            this._offlineDescriptions.set(reason, description);
+        }
+        return this._offlineDescriptions.get(reason).id;
+    }
+
+    _guardOfflineActivation(ev) {
+        if (!this.isOffline()) {
+            return;
+        }
+        const keyboard = ev.type.startsWith("key");
+        if (keyboard && !["Enter", " "].includes(ev.key)) {
+            return;
+        }
+        const target = ev.submitter || ev.target;
+        const control = target.closest?.("button, [data-offline-reason]") ||
+            (ev.type === "submit" ? target.querySelector('button[type="submit"], button:not([type])') : null);
+        if (!control || control.hasAttribute("data-available-offline")) {
+            return;
+        }
+        if (!this._gatedControls.has(control) && !control.matches(OfflinePlugin.SELECTORS_TO_DISABLE.join(", "))) {
+            return;
+        }
+        ev.stopImmediatePropagation();
+        if (keyboard || ["click", "auxclick", "dblclick", "submit"].includes(ev.type)) {
+            ev.preventDefault();
+        }
+        if (["click", "auxclick", "submit"].includes(ev.type) || (ev.type === "keydown" && !ev.repeat)) {
+            this.explainUnavailable(this._offlineReason(control));
+        }
+    }
+
+    explainUnavailable(reason = _t("This action needs a connection.")) {
+        this.notification.add(reason, { type: "info" });
+    }
+
+    _restoreOfflineControl(el, state) {
+        this._gatedControls.delete(el);
+        if (state.native) {
             el.removeAttribute("disabled");
+        }
+        if (state.ariaDisabled === null) {
+            el.removeAttribute("aria-disabled");
+        } else {
+            el.setAttribute("aria-disabled", state.ariaDisabled);
+        }
+        const ids = el.getAttribute("aria-describedby")?.split(/\s+/).filter((id) => id !== state.description);
+        if (ids?.length) {
+            el.setAttribute("aria-describedby", ids.join(" "));
+        } else {
+            el.removeAttribute("aria-describedby");
+        }
+        if (!state.hadClass) {
             el.classList.remove("o_disabled_offline");
-        });
+        }
+    }
+
+    _onlineUI() {
+        for (const [el, state] of this._gatedControls) {
+            this._restoreOfflineControl(el, state);
+        }
+        for (const description of this._offlineDescriptions.values()) {
+            description.remove();
+        }
+        this._offlineDescriptions.clear();
     }
 
     // -------------------------------------------------------------------------

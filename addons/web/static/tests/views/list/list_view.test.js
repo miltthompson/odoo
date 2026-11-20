@@ -21124,6 +21124,25 @@ test(`[Offline] cache web_search_read: enable filter online/offline`, async () =
     ]);
 });
 
+test("offline text search filters the saved page without a new read", async () => {
+    const setOffline = mockOffline();
+    onRpc("web_search_read", () => expect.step("read"));
+    await mountView({
+        resModel: "foo",
+        type: "list",
+        arch: `<list><field name="foo"/></list>`,
+        config: { actionId: 234 },
+    });
+    expect.verifySteps(["read"]);
+    await setOffline(true);
+    expect(".o_offline_freshness").toHaveText(/Offline: saved on this device/);
+    await contains(".o_offline_record_search").edit("BLIP", { confirm: false });
+    expect(queryAllTexts(".o_list_char")).toEqual(["blip", "blip"]);
+    await contains(".o_offline_record_search").edit("", { confirm: false });
+    expect(queryAllTexts(".o_list_char")).toEqual(["yop", "blip", "gnap", "blip"]);
+    expect.verifySteps([]);
+});
+
 test.tags("desktop");
 test(`multi_edit: edit field with operator with localization`, async () => {
     await mountView({
