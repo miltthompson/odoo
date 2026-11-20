@@ -133,7 +133,7 @@ const getBundleAssetType = (url) => {
     return type === "css" || type === "js" ? type : null;
 };
 
-const hasBundleFiles = async (cache, descriptor, assetType, checkHttpCache = false) => {
+const hasBundleFiles = async (cache, descriptor, assetType) => {
     const files = descriptor
         .filter(({ src }) => src)
         .map(({ src }) => new URL(src, self.location.origin))
@@ -143,12 +143,9 @@ const hasBundleFiles = async (cache, descriptor, assetType, checkHttpCache = fal
         if (await cache.match(file.href)) {
             return true;
         }
-        if (checkHttpCache) {
-            // An uncontrolled page may have loaded the file without notifying the worker.
-            await copyBundleFromHttpCache(file).catch(() => {});
-            return Boolean(await cache.match(file.href));
-        }
-        return false;
+        // An uncontrolled page may have loaded the file without notifying the worker.
+        await copyBundleFromHttpCache(file).catch(() => {});
+        return Boolean(await cache.match(file.href));
     }
     return (await Promise.all(files.map(isSaved))).every(Boolean);
 };
@@ -205,7 +202,7 @@ const readCachedBundle = async (request, descriptor) => {
     const url = new URL(request.url);
     const assetType = getBundleAssetType(url);
     const hasRequestedFiles = async (entry) =>
-        entry && hasBundleFiles(cache, await entry.clone().json(), assetType, true);
+        entry && hasBundleFiles(cache, await entry.clone().json(), assetType);
     async function readDescriptor(key) {
         // The writer saves the fallback before publishing a replacement. Read
         // the latest first so a concurrent publish cannot hide the fallback.

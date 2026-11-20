@@ -165,21 +165,37 @@ class WebManifestRoutesTest(HttpCaseWithUserDemo):
                 type === 'link' && src && isBundleFile(new URL(src, self.location.origin))
             );
             const stylesheet = new URL(src, self.location.origin);
+            const cssOnly = new Request(full.href + '&offline_asset_type=css');
+            const cache = await caches.open(bundleCacheName);
+            await saveBundleDescriptor(cache, full.href, Response.json(files));
+            // The stylesheet exists on the server but is not cached yet.
+            if (await readCachedBundle(cssOnly, true) || await cache.match(stylesheet.href)) {
+                throw new Error('A cache miss downloaded the stylesheet from the server');
+            }
+
             // An uncontrolled page can load a stylesheet without notifying the worker.
             const response = await fetch(stylesheet);
             if (!response.ok) {
                 throw new Error('Failed to warm the stylesheet in the HTTP cache');
             }
             await response.arrayBuffer();
-            const cache = await caches.open(bundleCacheName);
-            await saveBundleDescriptor(cache, full.href, Response.json(files));
-            if (await cache.match(stylesheet.href)) {
-                throw new Error('The stylesheet must start out in the HTTP cache only');
-            }
-
-            const cssOnly = new Request(full.href + '&offline_asset_type=css');
             if (!(await readCachedBundle(cssOnly, true)) || !(await cache.match(stylesheet.href))) {
                 throw new Error('Offline descriptor lookup did not recover the HTTP-cached stylesheet');
+            }
+
+            // Model another uncontrolled load where the old stylesheet is only in HTTP cache.
+            await cache.delete(stylesheet.href);
+            await saveBundleDescriptor(cache, cssOnly, Response.json([{ type: 'link', src }]));
+            await saveBundleDescriptor(cache, cssOnly, Response.json([
+                { type: 'link', src: '/web/assets/abcdef1/unloaded.min.css' },
+            ]));
+            const previous = await cache.match(cssOnly);
+            if (!previous || (await previous.json())[0].src !== src) {
+                throw new Error('Descriptor refresh discarded the stylesheet still in HTTP cache');
+            }
+            const [entry] = await (await readCachedBundle(cssOnly, true)).json();
+            if (entry.src !== src) {
+                throw new Error('Offline lookup did not return the preserved descriptor');
             }
         """)
 
