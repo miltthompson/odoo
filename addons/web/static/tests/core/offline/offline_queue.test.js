@@ -1,7 +1,11 @@
 import { expect, test } from "@odoo/hoot";
+import { makeErrorFromResponse } from "@web/core/network/rpc";
 import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { OfflineQueueStore } from "@web/core/offline/offline_storage";
-import { getService, makeTestApp, onRpc } from "@web/../tests/web_test_helpers";
+import {
+    contains, defineModels, fields, getService, makeTestApp, mockOffline, models, mountView,
+    onRpc, patchWithCleanup,
+} from "@web/../tests/web_test_helpers";
 
 function rejection(code, name) {
     return new Response(JSON.stringify({ error: { code, data: { name } } }), {
@@ -60,6 +64,107 @@ test("editing a legacy local draft queues a write referencing its first create",
     expect(sent).toHaveLength(2);
     expect(sent[1].refs).toEqual([sent[0].key]);
     expect(sent[1].args).toEqual([[`offline:${sent[0].key}`], { name: "Edited draft" }]);
+});
+
+test("failed draft saves do not leave a create behind and follow-up saves only send the delta", async () => {
+    class Lead extends models.Model {
+        name = fields.Char();
+        email = fields.Char();
+    }
+    defineModels([Lead]);
+    const setOffline = mockOffline();
+    await mountView({
+        type: "form", resModel: "lead",
+        arch: `<form><field name="name"/><field name="email"/></form>`,
+    });
+    const offline = getService(OfflinePlugin);
+    let fail = true;
+    patchWithCleanup(offline._queue.db, {
+        async write(table, ...args) {
+            if (fail && table === "entries") {
+                throw new Error("Storage is full");
+            }
+            return super.write(table, ...args);
+        },
+    });
+    await setOffline(true);
+    await contains(".o_field_widget[name='name'] input").edit("Draft");
+    await contains(".o_field_widget[name='email'] input").edit("contact@example.com");
+    await contains(".o_form_button_save").click();
+    expect(offline.getPendingEntries()).toEqual([]);
+    expect(".o_form_button_save").toBeVisible();
+
+    fail = false;
+    await contains(".o_form_button_save").click();
+    const [create] = offline.getPendingEntries();
+    expect(create.args).toEqual([[], { name: "Draft", email: "contact@example.com" }]);
+    await contains(".o_field_widget[name='name'] input").edit("Updated draft");
+    await contains(".o_form_button_save").click();
+    const [, edit] = await offline._queue.list();
+    expect(edit.args).toEqual([[`offline:${create.key}`], { name: "Updated draft" }]);
+});
+
+test("ordered changes to the same draft remain blocked after its create succeeds", async () => {
+    const sent = [];
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        const { name } = params.args[1];
+        sent.push(name);
+        return name === "First edit" ? rejection(0, "odoo.exceptions.AccessError") : [{ id: 47 }];
+    });
+    await makeTestApp();
+    const offline = getService(OfflinePlugin);
+    const draft = offline.scheduleORM("res.partner", "web_save", [[], { name: "Draft" }], {});
+    for (const name of ["First edit", "Second edit"]) {
+        offline.scheduleORM("res.partner", "web_save", [[], { name }], {}, { id: draft });
+    }
+    await offline._syncORM();
+    expect(sent).toEqual(["Draft", "First edit"]);
+    expect(offline.getPendingEntries().map(({ state }) => state)).toEqual(["needs_attention", "held_back"]);
+});
+
+test("a bulk edit does not publish any entries if its durable batch fails", async () => {
+    await makeTestApp();
+    const offline = getService(OfflinePlugin);
+    let attempted;
+    let fail = true;
+    patchWithCleanup(offline._queue.db, {
+        async write(table, ...args) {
+            if (table === "entries") {
+                attempted = args[0].length;
+                if (fail) {
+                    throw new Error("Storage is full");
+                }
+            }
+            return super.write(table, ...args);
+        },
+    });
+    const calls = [1, 2].map((id) => ({
+        model: "res.partner", method: "write", args: [[id], { name: "Moved" }], kwargs: {},
+    }));
+    expect(await offline.scheduleORMBatch(calls)).toBe(undefined);
+    expect(attempted).toBe(2);
+    expect(await offline._queue.list()).toEqual([]);
+    expect(offline.getPendingEntries()).toEqual([]);
+
+    fail = false;
+    expect(await offline.scheduleORMBatch(calls)).toHaveLength(2);
+    expect((await offline._queue.list()).map((entry) => entry.args[0])).toEqual([[1], [2]]);
+});
+
+test("a rejected mock dataset call stays queued through the mock replay endpoint", async () => {
+    onRpc("write", () => {
+        expect.step("dataset write");
+        throw makeErrorFromResponse({ code: 200, data: { name: "odoo.exceptions.AccessError" } });
+    });
+    await makeTestApp();
+    const offline = getService(OfflinePlugin);
+    queueChange(offline, 1, "Rejected edit", 1);
+    await offline._syncORM();
+    expect.verifySteps(["dataset write"]);
+    expect(offline.getPendingEntries().map(({ state, error }) => [state, error])).toEqual([
+        ["needs_attention", "You no longer have access to this record."],
+    ]);
 });
 
 test("atomic steps are persisted and sent together after their external dependency", async () => {

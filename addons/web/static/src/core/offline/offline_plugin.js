@@ -288,16 +288,44 @@ export class OfflinePlugin extends Plugin {
         if (!this._queue) {
             throw new NonSecureContextError(_t("Offline changes are not available in this session."));
         }
-        const value = { model, method, args, kwargs, extras: options.extras };
-        const legacyKey = options.id ?? hashCode(JSON.stringify(value));
-        const entry = this._makeEntry(legacyKey, value, options);
+        const entry = this._makeEntry({ model, method, args, kwargs, options });
         this._pending.set([...this._pending(), entry]);
-        this._ormToSync()[legacyKey] = { key: legacyKey, value };
+        this._ormToSync()[entry.legacyKey] = this._compatEntry(entry);
         this._enqueueWrite(async () => {
-            const saved = await this._queue.add(entry);
-            this._replaceEntry(saved);
+            if (this._hasUnsavedDependency(entry)) {
+                this._removeEntry(entry.key);
+                throw new Error("An earlier offline change has not been saved");
+            }
+            this._replaceEntry(await this._queue.add(entry));
         });
-        return legacyKey;
+        return entry.legacyKey;
+    }
+
+    /** Persist individual calls together locally; no entries are shown if storage fails. */
+    async scheduleORMBatch(calls) {
+        if (!this._queue) {
+            throw new NonSecureContextError(_t("Offline changes are not available in this session."));
+        }
+        if (!calls.length) {
+            return [];
+        }
+        let keys;
+        await this._enqueueWrite(async () => {
+            const entries = calls.map((call) => this._makeEntry(call));
+            if (entries.some((entry) => this._hasUnsavedDependency(entry))) {
+                throw new Error("An earlier offline change has not been saved");
+            }
+            const saved = await this._queue.addMany(entries);
+            this._pending.set([...this._pending(), ...saved].sort((a, b) =>
+                (a.seq ?? Infinity) - (b.seq ?? Infinity)
+            ));
+            for (const entry of saved) {
+                const latest = this.getPendingEntry(entry.legacyKey);
+                this._ormToSync()[entry.legacyKey] = this._compatEntry(latest);
+            }
+            keys = saved.map((entry) => entry.legacyKey);
+        });
+        return keys;
     }
 
     /** Queue all steps as one change. `target` is the record affected by the whole operation. */
@@ -534,8 +562,13 @@ export class OfflinePlugin extends Plugin {
     // ORM Offline
     // -------------------------------------------------------------------------
 
-    _makeEntry(legacyKey, value, options) {
-        const { model, method, args, kwargs, extras } = value;
+    _hasUnsavedDependency(entry) {
+        return this._pending().some((earlier) => earlier.seq === null && entry.refs.includes(earlier.key));
+    }
+
+    _makeEntry({ model, method, args, kwargs, options = {} }) {
+        const extras = options.extras;
+        const legacyKey = options.id ?? hashCode(JSON.stringify({ model, method, args, kwargs, extras }));
         const targetIds = (method !== "create" && Array.isArray(args[0]) &&
             args[0].filter((id) => typeof id === "number" || typeof id === "string")) || [];
         // Before a pending create has a record ID, the legacy form reuses its UI key
@@ -552,7 +585,7 @@ export class OfflinePlugin extends Plugin {
             args: create ? [[`offline:${create.key}`], ...args.slice(1)] : args,
             legacyArgs: create ? args : undefined,
             refs: create ? [create.key, ...(options.refs || [])] : options.refs || [],
-            target: options.target || { model, ids: targetIds },
+            target: options.target || { model, ids: create ? [`offline:${create.key}`] : targetIds },
             steps: options.steps,
             label: options.label || extras?.displayName || "",
             acted_at: extras?.timeStamp ?? Date.now(),

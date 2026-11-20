@@ -1240,10 +1240,13 @@ export class MockServer {
         // Mock the dispatch behind sync through the same dataset observers and ORM listeners.
         // A test can still intercept /web/offline/sync directly to assert the wire protocol.
         const path = `/web/dataset/call_kw/${encodeURIComponent(model)}/${encodeURIComponent(method)}`;
-        return this._handleRequest(new URL(path, request.url), {
+        const response = await this._handleRequest(new URL(path, request.url), {
             method: "POST",
             headers: request.headers,
             body: JSON.stringify({ ...envelope, params: { model, method, args, kwargs } }),
+        });
+        return response instanceof Response ? response : new Response(JSON.stringify(response), {
+            headers: { "Content-Type": "application/json" },
         });
     }
 
