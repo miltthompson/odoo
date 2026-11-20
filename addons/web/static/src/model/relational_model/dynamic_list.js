@@ -1,6 +1,7 @@
 import { ConfirmationDialog } from "@web/core/confirmation_dialog/confirmation_dialog";
 import { _t } from "@web/core/l10n/translation";
 import { ConnectionLostError } from "@web/core/network/rpc";
+import { isOfflineRecordId } from "@web/core/offline/offline_id";
 import { x2ManyCommands } from "@web/core/orm_plugin";
 import { unique } from "@web/core/utils/arrays";
 import { deepEqual } from "@web/core/utils/objects";
@@ -481,6 +482,10 @@ export class DynamicList extends DataPoint {
             return false;
         }
         const resIds = records.map((record) => record.resId);
+        if (resIds.some(isOfflineRecordId)) {
+            const saved = await Promise.all(records.map((record) => record._offlineSave()));
+            return saved.every(Boolean);
+        }
         const [vals] = valsList;
         let values;
         try {
@@ -512,7 +517,7 @@ export class DynamicList extends DataPoint {
     }
 
     async _resequence(originalList, resModel, movedIds, targetId) {
-        if (this.resModel === resModel && !this.canResequence()) {
+        if (this.model.offlinePlugin.isOffline() || (this.resModel === resModel && !this.canResequence())) {
             return;
         }
         const handleField = this.resModel === resModel ? this.handleField : DEFAULT_HANDLE_FIELD;

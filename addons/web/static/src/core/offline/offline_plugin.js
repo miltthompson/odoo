@@ -15,6 +15,7 @@ import { _t } from "@web/core/l10n/translation";
 import { normalize } from "@web/core/l10n/utils";
 import { ConnectionLostError, rpc, rpcBus } from "@web/core/network/rpc";
 import { OfflineQueueStore, clearLegacyReadStores, offlineDatabaseName, withLegacyQueue } from "./offline_storage";
+import { isOfflineRecordId, offlineRecordRef } from "./offline_id";
 import { user } from "@web/core/user";
 import { registry } from "@web/core/registry";
 import { services } from "@web/core/services";
@@ -149,6 +150,7 @@ export class OfflinePlugin extends Plugin {
             return;
         }
         this.isOffline.set(offline);
+        rpcBus.trigger("OFFLINE:STATUS_CHANGED", { offline });
         this._visited.set({});
         if (offline) {
             // Disable everything in the UI that isn't marked as available offline.
@@ -239,6 +241,9 @@ export class OfflinePlugin extends Plugin {
      * @returns boolean
      */
     isAvailableOffline(actionId, viewType, resId) {
+        if (viewType === "form" && isOfflineRecordId(resId)) {
+            return this._pending().some((entry) => entry.createdId === resId && entry.extras?.actionId === actionId);
+        }
         const action = this._visited()[actionId];
         if (!viewType) {
             return !!action;
@@ -335,6 +340,16 @@ export class OfflinePlugin extends Plugin {
 
     getPendingEntry(legacyKey) {
         return this._pending().findLast((entry) => String(entry.legacyKey) === String(legacyKey));
+    }
+
+    /** Reference an offline create in replay args/kwargs without passing a local ID to the ORM. */
+    getRecordReference(model, id) {
+        const create = this._pending().find((entry) => entry.model === model && entry.createdId === id);
+        return create && { value: offlineRecordRef(create.key), key: create.key };
+    }
+
+    resolveOfflineRecord(model, id) {
+        return this._queue?.resolveRecord(model, id);
     }
 
     async waitForPendingWrite(key) {
@@ -588,6 +603,7 @@ export class OfflinePlugin extends Plugin {
             refs: create ? [create.key, ...(options.refs || [])] : options.refs || [],
             target: options.target || { model, ids: targetIds },
             steps: options.steps,
+            createdId: options.createdId,
             label: options.label || extras?.displayName || "",
             acted_at: extras?.timeStamp ?? Date.now(),
             server_version: session.registry_hash,
@@ -737,6 +753,13 @@ export class OfflinePlugin extends Plugin {
                         continue;
                     }
                     await this._queue.lock(async () => {
+                        if (entry.createdId) {
+                            const created = Array.isArray(result) ? result[0] : result;
+                            const id = result?.already_applied ? result.created_ids[0] : created?.id ?? created;
+                            if (Number.isSafeInteger(id) && id > 0) {
+                                await this._queue.recordResolution(model, entry.createdId, key, id);
+                            }
+                        }
                         await this._queue.remove(key);
                         this._removeEntry(key);
                     });
