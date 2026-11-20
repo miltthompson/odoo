@@ -351,6 +351,11 @@ test("CRM dependent-app header actions explain why they are unavailable offline"
             <sheet><field name="name"/></sheet>
         </form>`,
     });
+    patchWithCleanup(getService("action"), {
+        async doActionButton({ name }) {
+            expect.step(name);
+        },
+    });
     await setOffline(true);
     const quotation = "button[name='action_sale_quotations_new']";
     if (getService("ui").isSmall) {
@@ -365,4 +370,8 @@ test("CRM dependent-app header actions explain why they are unavailable offline"
     expect(quotation).toHaveAttribute("aria-disabled", "true");
     expect(quotation).toHaveAttribute("data-tooltip", "This action needs a connection.");
     expect("button[name='2']").toHaveAttribute("aria-disabled", "true");
+
+    await contains(quotation).click();
+    expect(".o_notification_content").toHaveText("This action needs a connection.");
+    expect.verifySteps([]);
 });
