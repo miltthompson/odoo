@@ -214,6 +214,9 @@ class OfflineSystray extends Component {
     }
 
     get labelText() {
+        if (this.offlinePlugin.syncPaused()) {
+            return _t("Log in again to send changes");
+        }
         if (this.offlinePlugin.syncingORM()) {
             return _t("Syncing");
         }

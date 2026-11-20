@@ -493,8 +493,8 @@ export class DynamicList extends DataPoint {
         } catch (e) {
             if (e instanceof ConnectionLostError) {
                 // keep the changes and replay them when the connection is back
-                records.forEach((record) => record._offlineSave());
-                return true;
+                const saved = await Promise.all(records.map((record) => record._offlineSave()));
+                return saved.every(Boolean);
             }
             undoFns.forEach((undo) => undo());
             throw e;

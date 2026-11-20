@@ -1388,7 +1388,8 @@ export class Record extends DataPoint {
         this.dirty = false;
     }
 
-    _offlineSave() {
+    async _offlineSave() {
+        const key = window.crypto.randomUUID();
         this._offlineChanges = markRaw({ ...(this._offlineChanges || {}), ...this._changes });
         const offlineChanges = this._getChanges(this._offlineChanges);
         delete offlineChanges.id; // id never changes, and should not be written
@@ -1401,6 +1402,7 @@ export class Record extends DataPoint {
             { context: this.context, specification: {} }, //Here for the kwargs we don't need the specification or the next_id
             {
                 id: this._offlineId,
+                key,
                 extras: {
                     ...getScheduleORMExtras(this.model, [this]),
                     changes: this._formatOfflineValues(this._offlineChanges),
@@ -1413,6 +1415,9 @@ export class Record extends DataPoint {
             }
         );
 
+        if (!(await this.model.offlinePlugin.waitForPendingWrite(key))) {
+            return false;
+        }
         this._commitSave();
         return true;
     }
