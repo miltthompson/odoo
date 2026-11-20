@@ -200,11 +200,8 @@ const primeBundle = async ({ source, data: { url, descriptor, bundles } }) => {
     if (Array.isArray(descriptor) && typeof url === "string") {
         const descriptorURL = new URL(url, self.location.origin);
         if (isBundleDescriptor(descriptorURL)) {
-            const cache = await caches.open(bundleCacheName);
-            // Do not replace a potentially newer response from a controlled visit.
-            if (!(await cache.match(descriptorURL.href))) {
-                await cache.put(descriptorURL.href, Response.json(descriptor));
-            }
+            // Runtime asset edits can change the files without changing the registry hash.
+            await saveBundle(descriptorURL.href, Response.json(descriptor), true);
         }
     }
     await primeBundleFiles(bundles);

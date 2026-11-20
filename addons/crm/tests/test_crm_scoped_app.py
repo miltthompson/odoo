@@ -48,31 +48,40 @@ class TestCrmScopedApp(HttpCase):
                 }
                 const { loadBundle, getBundle } = odoo.loader.modules.get('@web/core/assets');
                 const bundle = 'web.assets_backend_lazy';
-                await loadBundle(bundle);
-                const { jsLibs } = await getBundle(bundle);
-                const lazyScript = jsLibs.find((url) => url.startsWith('/web/assets/'));
-                const stylesheet = document.querySelector('link[rel=stylesheet][media=screen][href^="/web/assets/"]');
-                const descriptor = performance.getEntriesByType('resource').find(
-                    ({ name }) => new URL(name).pathname === `/web/bundle/${bundle}`
-                );
-                if (!lazyScript || !stylesheet || !descriptor) {
-                    throw new Error('The pipeline did not load its expected JS and CSS bundles');
+                const { bundle_params, registry_hash } = odoo.loader.modules.get('@web/session').session;
+                const descriptorURL = new URL(`/web/bundle/${bundle}`, location.origin);
+                descriptorURL.search = new URLSearchParams({ ...bundle_params, registry_hash });
+                const cache = await caches.open('odoo-sw-bundles');
+                if (!scoped) {
+                    // An asset edit can leave an old descriptor at the same registry-keyed URL.
+                    await cache.put(descriptorURL, Response.json([{ type: 'script', src: '/old.js' }]));
                 }
-                async function waitForCacheEntry(cache, url) {
+                await loadBundle(bundle);
+                const { jsLibs, cssLibs } = await getBundle(bundle);
+                const lazyScript = jsLibs.find((url) => url.startsWith('/web/assets/'));
+                const lazyStylesheet = cssLibs.find((url) => url.startsWith('/web/assets/'));
+                if (!lazyScript || !lazyStylesheet) {
+                    throw new Error('The pipeline did not load its expected lazy JS and CSS bundles');
+                }
+                async function waitForCacheEntry(cache, url, matches) {
                     const deadline = performance.now() + 5000;
                     while (performance.now() < deadline) {
                         const entry = await cache.match(url);
-                        if (entry) {
+                        if (entry && (!matches || await matches(entry))) {
                             return entry;
                         }
                         await new Promise(requestAnimationFrame);
                     }
-                    throw new Error(`No cached response for ${url}`);
+                    throw new Error(`No matching cached response for ${url}`);
                 }
-                const cache = await caches.open('odoo-sw-bundles');
-                await Promise.all([lazyScript, stylesheet.href, descriptor.name].map(
-                    (url) => waitForCacheEntry(cache, url)
-                ));
+                await Promise.all([
+                    waitForCacheEntry(cache, lazyScript),
+                    waitForCacheEntry(cache, lazyStylesheet),
+                    waitForCacheEntry(cache, descriptorURL, async (entry) => {
+                        const files = (await entry.json()).map(({ src }) => src);
+                        return files.includes(lazyScript) && files.includes(lazyStylesheet);
+                    }),
+                ]);
                 const pageCache = await caches.open('odoo-sw-cache');
                 const page = await waitForCacheEntry(pageCache, scoped ? '/scoped_app' : '/odoo');
                 const shell = await page.text();
