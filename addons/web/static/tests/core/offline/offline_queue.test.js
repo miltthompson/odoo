@@ -1,8 +1,6 @@
 import { expect, test } from "@odoo/hoot";
 import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { OfflineQueueStore } from "@web/core/offline/offline_storage";
-import { user } from "@web/core/user";
-import { IndexedDB, VERSION_KEY, VERSION_TABLE } from "@web/core/utils/indexed_db";
 import { getService, makeTestApp, onRpc } from "@web/../tests/web_test_helpers";
 
 function rejection(code, name) {
@@ -136,36 +134,4 @@ test("key rotation keeps the owner's waiting changes readable, not another user'
     expect((await rotated.keys.current()).id).not.toBe((await initial.keyReady).id);
     expect(await new OfflineQueueStore({ ...owner, uid: 9 }, oldKey).list()).toEqual([]);
     expect(await new OfflineQueueStore({ ...owner, db: "other-db" }, oldKey).list()).toEqual([]);
-});
-
-test("an update quarantines legacy changes even when their UID matches", async () => {
-    const previousTab = new IndexedDB("offline", "another-database-version");
-    await previousTab.read(VERSION_TABLE, VERSION_KEY);
-    const currentTab = new IndexedDB("offline", "current-database-version");
-    const saveLegacy = (db, key, kwargs) => db.write("orm-to-sync", key, JSON.stringify({
-        model: "res.partner", method: "write", args: [[1], { name: key }], kwargs,
-    }));
-    await saveLegacy(currentTab, "No owner recorded", {});
-    // A tab that initialized before the database switch writes under the new marker.
-    await saveLegacy(previousTab, "Another database", { context: { uid: user.userId } });
-    expect(await currentTab.read(VERSION_TABLE, VERSION_KEY)).toBe("current-database-version");
-
-    const sent = [];
-    onRpc("/web/offline/sync", async (request) => {
-        const { params } = await request.json();
-        sent.push(params.args[1].name);
-        return true;
-    });
-    await makeTestApp();
-    const offline = getService(OfflinePlugin);
-    await offline.getQueueReady();
-    expect(offline.getPendingEntries()).toEqual([]);
-    expect(offline.getLegacyPendingCount()).toBe(2);
-
-    queueChange(offline, 1, "New edit", 30);
-    await offline._syncORM();
-    expect(sent).toEqual(["New edit"]);
-    const rows = await currentTab.getAllEntries("orm-to-sync");
-    expect(rows.map(({ key }) => key).sort()).toEqual(["Another database", "No owner recorded"]);
-    expect(rows.every(({ value }) => !!value.payload)).toBe(true);
 });

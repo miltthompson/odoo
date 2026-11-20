@@ -5,9 +5,6 @@ const encoder = new TextEncoder();
 const KEYS = "keys";
 const ENTRIES = "entries";
 const QUEUE_META = "meta";
-const LEGACY_ENTRIES = "orm-to-sync";
-const LEGACY_KEY = "quarantine";
-const LEGACY_LOCK = "odoo-offline-legacy-queue";
 
 export async function offlineDigest(text) {
     const digest = await window.crypto.subtle.digest("SHA-256", encoder.encode(text));
@@ -123,35 +120,8 @@ export class OfflineQueueStore {
 }
 
 export function clearLegacyReadStores() {
-    return navigator.locks.request(LEGACY_LOCK, () => Promise.all([
-        new IndexedDB("offline", undefined, { durability: "strict" }).invalidate([/^visited-ui-items/, /^many2x_/]),
+    return Promise.all([
         new IndexedDB("rpc").invalidate(),
         new IndexedDB("webclient_menu").invalidate(),
-    ]));
-}
-
-// The old queue is shared by all database tabs on this origin. Its version marker
-// does not identify the author of individual rows. Preserve them without replay.
-export function quarantineLegacyQueue() {
-    return navigator.locks.request(LEGACY_LOCK, async () => {
-        const legacy = new IndexedDB("offline", undefined, { durability: "strict" });
-        const rows = (await legacy.getAllEntries(LEGACY_ENTRIES)) || [];
-        if (!rows.length) {
-            return 0;
-        }
-        let key = await legacy.read(KEYS, LEGACY_KEY);
-        if (!key) {
-            const bytes = window.crypto.getRandomValues(new Uint8Array(16));
-            key = await Crypto.importKey(Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(""));
-            await legacy.write(KEYS, LEGACY_KEY, key);
-        }
-        const crypto = new Crypto(key);
-        for (const row of rows) {
-            if (typeof row.value === "string") {
-                const payload = await crypto.encrypt(row.value);
-                await legacy.write(LEGACY_ENTRIES, row.key, { payload });
-            }
-        }
-        return rows.length;
-    });
+    ]);
 }

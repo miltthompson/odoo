@@ -116,18 +116,11 @@ class OfflineSystray extends Component {
         return "text-bg-300";
     }
 
-    get legacyNotice() {
-        const count = this.offlinePlugin.getLegacyPendingCount();
-        return count === 1
-            ? _t("One change saved on this device before the update can't be sent from this account.")
-            : _t("%s changes saved on this device before the update can't be sent from this account.", count);
-    }
-
     get labelIcon() {
         if (this.offlinePlugin.syncingORM()) {
             return "spinner-border";
         }
-        if (this.inError() || this.offlinePlugin.getLegacyPendingCount()) {
+        if (this.inError()) {
             return "error";
         }
         if (this.offlinePlugin.isOffline()) {
@@ -146,7 +139,7 @@ class OfflineSystray extends Component {
         if (this.offlinePlugin.isOffline()) {
             return _t("Working offline");
         }
-        if (this.inError() || this.offlinePlugin.getLegacyPendingCount()) {
+        if (this.inError()) {
             return _t("Sync issues");
         }
         return _t("Syncing");
