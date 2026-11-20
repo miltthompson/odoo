@@ -46,17 +46,20 @@ class TestCrmScopedApp(HttpCase):
                 } else if (serviceWorker.controller) {
                     throw new Error('Expected the first main webclient visit to be uncontrolled');
                 }
-                const { loadBundle, getBundle } = odoo.loader.modules.get('@web/core/assets');
+                const { loadBundle, getBundle, loadCSS } = odoo.loader.modules.get('@web/core/assets');
                 const bundle = 'web.assets_backend_lazy';
                 const { bundle_params, registry_hash } = odoo.loader.modules.get('@web/session').session;
                 const descriptorURL = new URL(`/web/bundle/${bundle}`, location.origin);
                 descriptorURL.search = new URLSearchParams({ ...bundle_params, registry_hash });
                 const cache = await caches.open('odoo-sw-bundles');
+                const oldScript = '/web/assets/abcdef0/web.assets_backend_lazy.min.js';
                 if (!scoped) {
-                    // An asset edit can leave an old descriptor at the same registry-keyed URL.
-                    await cache.put(descriptorURL, Response.json([{ type: 'script', src: '/old.js' }]));
+                    // An asset edit can leave a working older bundle at the same descriptor URL.
+                    await cache.put(oldScript, new Response('// old bundle', {
+                        headers: { 'Content-Type': 'text/javascript' },
+                    }));
+                    await cache.put(descriptorURL, Response.json([{ type: 'script', src: oldScript }]));
                 }
-                await loadBundle(bundle);
                 const { jsLibs, cssLibs } = await getBundle(bundle);
                 const lazyScript = jsLibs.find((url) => url.startsWith('/web/assets/'));
                 const lazyStylesheet = cssLibs.find((url) => url.startsWith('/web/assets/'));
@@ -74,6 +77,23 @@ class TestCrmScopedApp(HttpCase):
                     }
                     throw new Error(`No matching cached response for ${url}`);
                 }
+                if (!scoped) {
+                    // Simulate an interrupted bundle load: the new CSS arrives but the JS does not.
+                    await loadCSS(lazyStylesheet);
+                    const { active } = await serviceWorker.ready;
+                    active.postMessage({
+                        type: 'cache_bundle',
+                        url: descriptorURL.href,
+                        descriptor: [{ type: 'link', src: lazyStylesheet }, { type: 'script', src: lazyScript }],
+                        bundles: [lazyStylesheet],
+                    });
+                    await waitForCacheEntry(cache, lazyStylesheet);
+                    const [entry] = await (await cache.match(descriptorURL)).json();
+                    if (entry.src !== oldScript) {
+                        throw new Error('An incomplete bundle replaced the usable cached descriptor');
+                    }
+                }
+                await loadBundle(bundle);
                 await Promise.all([
                     waitForCacheEntry(cache, lazyScript),
                     waitForCacheEntry(cache, lazyStylesheet),

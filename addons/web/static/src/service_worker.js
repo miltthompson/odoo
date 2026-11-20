@@ -127,15 +127,52 @@ const isBundleDescriptor = (url) =>
     url.searchParams.has("registry_hash") &&
     !usesDebugAssets(url);
 
+// Keep the last usable descriptor until all of the replacement's versioned files are saved.
+const pendingBundleDescriptors = new Map();
+
+const publishBundleDescriptor = async (cache, url, pending) => {
+    const files = await Promise.all(Array.from(pending.files, (file) => cache.match(file)));
+    if (files.every(Boolean) && pendingBundleDescriptors.get(url) === pending) {
+        pendingBundleDescriptors.delete(url);
+        await cache.put(url, Response.json(pending.descriptor));
+    }
+};
+
 const saveBundle = async (request, response, descriptor) => {
     const contentType = response.headers.get("Content-Type") || "";
     const expectedType = descriptor ? /application\/json/ : /javascript|text\/css/;
-    if (response.status === 200 && !response.redirected && expectedType.test(contentType)) {
-        const cache = await caches.open(bundleCacheName);
-        if (descriptor || !(await cache.match(request))) {
+    if (response.status !== 200 || response.redirected || !expectedType.test(contentType)) {
+        return;
+    }
+    const cache = await caches.open(bundleCacheName);
+    const url = typeof request === "string" ? request : request.url;
+    if (descriptor) {
+        const data = await response.json();
+        if (!Array.isArray(data)) {
+            return;
+        }
+        const files = new Set();
+        for (const { src } of data) {
+            if (src) {
+                const file = new URL(src, self.location.origin);
+                if (isBundleFile(file)) {
+                    files.add(file.href);
+                }
+            }
+        }
+        const pending = { descriptor: data, files };
+        pendingBundleDescriptors.set(url, pending);
+        await publishBundleDescriptor(cache, url, pending);
+    } else {
+        if (!(await cache.match(request))) {
             await cache.put(request, response);
         } else {
             await response.body?.cancel();
+        }
+        for (const [descriptorURL, pending] of pendingBundleDescriptors) {
+            if (pending.files.has(url)) {
+                await publishBundleDescriptor(cache, descriptorURL, pending);
+            }
         }
     }
 };
@@ -200,7 +237,6 @@ const primeBundle = async ({ source, data: { url, descriptor, bundles } }) => {
     if (Array.isArray(descriptor) && typeof url === "string") {
         const descriptorURL = new URL(url, self.location.origin);
         if (isBundleDescriptor(descriptorURL)) {
-            // Runtime asset edits can change the files without changing the registry hash.
             await saveBundle(descriptorURL.href, Response.json(descriptor), true);
         }
     }
