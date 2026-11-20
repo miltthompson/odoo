@@ -52,13 +52,14 @@ class TestCrmScopedApp(HttpCase):
                 const descriptorURL = new URL(`/web/bundle/${bundle}`, location.origin);
                 descriptorURL.search = new URLSearchParams({ ...bundle_params, registry_hash });
                 const cache = await caches.open('odoo-sw-bundles');
+                const latestDescriptors = await caches.open('odoo-sw-bundle-descriptors');
                 const oldScript = '/web/assets/abcdef0/web.assets_backend_lazy.min.js';
                 if (!scoped) {
                     // An asset edit can leave a working older bundle at the same descriptor URL.
                     await cache.put(oldScript, new Response('// old bundle', {
                         headers: { 'Content-Type': 'text/javascript' },
                     }));
-                    await cache.put(descriptorURL, Response.json([{ type: 'script', src: oldScript }]));
+                    await latestDescriptors.put(descriptorURL, Response.json([{ type: 'script', src: oldScript }]));
                 }
                 const { jsLibs, cssLibs } = await getBundle(bundle);
                 const lazyScript = jsLibs.find((url) => url.startsWith('/web/assets/'));
@@ -77,17 +78,19 @@ class TestCrmScopedApp(HttpCase):
                     }
                     throw new Error(`No matching cached response for ${url}`);
                 }
+                await waitForCacheEntry(latestDescriptors, descriptorURL, async (entry) => {
+                    const files = (await entry.json()).map(({ src }) => src);
+                    return files.includes(lazyScript) && files.includes(lazyStylesheet);
+                });
                 if (!scoped) {
-                    // Simulate an interrupted bundle load: the new CSS arrives but the JS does not.
+                    // The new descriptor survives on disk even if only its CSS has arrived.
                     await loadCSS(lazyStylesheet);
                     const { active } = await serviceWorker.ready;
-                    active.postMessage({
-                        type: 'cache_bundle',
-                        url: descriptorURL.href,
-                        descriptor: [{ type: 'link', src: lazyStylesheet }, { type: 'script', src: lazyScript }],
-                        bundles: [lazyStylesheet],
-                    });
+                    active.postMessage({ type: 'cache_bundle', bundles: [lazyStylesheet] });
                     await waitForCacheEntry(cache, lazyStylesheet);
+                    if (await cache.match(lazyScript)) {
+                        throw new Error('The test must leave the replacement JS unloaded');
+                    }
                     const [entry] = await (await cache.match(descriptorURL)).json();
                     if (entry.src !== oldScript) {
                         throw new Error('An incomplete bundle replaced the usable cached descriptor');
@@ -97,10 +100,6 @@ class TestCrmScopedApp(HttpCase):
                 await Promise.all([
                     waitForCacheEntry(cache, lazyScript),
                     waitForCacheEntry(cache, lazyStylesheet),
-                    waitForCacheEntry(cache, descriptorURL, async (entry) => {
-                        const files = (await entry.json()).map(({ src }) => src);
-                        return files.includes(lazyScript) && files.includes(lazyStylesheet);
-                    }),
                 ]);
                 const pageCache = await caches.open('odoo-sw-cache');
                 const page = await waitForCacheEntry(pageCache, scoped ? '/scoped_app' : '/odoo');

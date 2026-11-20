@@ -3,6 +3,7 @@
 /* eslint-disable no-restricted-globals */
 const pageCacheName = "odoo-sw-cache";
 const bundleCacheName = "odoo-sw-bundles";
+const bundleDescriptorCacheName = "odoo-sw-bundle-descriptors";
 const scopePath = new URL(self.registration.scope).pathname;
 const offlineURL = "/odoo/offline";
 const sessionPattern = /(odoo\.__session_info__\s*=\s*)({[^\r\n]*})(;)/;
@@ -127,15 +128,33 @@ const isBundleDescriptor = (url) =>
     url.searchParams.has("registry_hash") &&
     !usesDebugAssets(url);
 
-// Keep the last usable descriptor until all of the replacement's versioned files are saved.
-const pendingBundleDescriptors = new Map();
+const hasBundleFiles = async (cache, descriptor) => {
+    const files = descriptor
+        .filter(({ src }) => src)
+        .map(({ src }) => new URL(src, self.location.origin))
+        .filter(isBundleFile);
+    return (await Promise.all(files.map((file) => cache.match(file.href)))).every(Boolean);
+};
 
-const publishBundleDescriptor = async (cache, url, pending) => {
-    const files = await Promise.all(Array.from(pending.files, (file) => cache.match(file)));
-    if (files.every(Boolean) && pendingBundleDescriptors.get(url) === pending) {
-        pendingBundleDescriptors.delete(url);
-        await cache.put(url, Response.json(pending.descriptor));
+const saveBundleDescriptor = async (cache, request, response) => {
+    const descriptor = await response.json();
+    if (!Array.isArray(descriptor)) {
+        return;
     }
+    const latestCache = await caches.open(bundleDescriptorCacheName);
+    const previous = await latestCache.match(request);
+    if (previous) {
+        const previousDescriptor = await previous.json();
+        if (JSON.stringify(previousDescriptor) === JSON.stringify(descriptor)) {
+            return;
+        }
+        // Keep the last complete bundle before recording a replacement. Check at
+        // descriptor reads/writes, not at every asset load or in worker memory.
+        if (await hasBundleFiles(cache, previousDescriptor)) {
+            await cache.put(request, Response.json(previousDescriptor));
+        }
+    }
+    await latestCache.put(request, Response.json(descriptor));
 };
 
 const saveBundle = async (request, response, descriptor) => {
@@ -145,36 +164,29 @@ const saveBundle = async (request, response, descriptor) => {
         return;
     }
     const cache = await caches.open(bundleCacheName);
-    const url = typeof request === "string" ? request : request.url;
     if (descriptor) {
-        const data = await response.json();
-        if (!Array.isArray(data)) {
-            return;
-        }
-        const files = new Set();
-        for (const { src } of data) {
-            if (src) {
-                const file = new URL(src, self.location.origin);
-                if (isBundleFile(file)) {
-                    files.add(file.href);
-                }
-            }
-        }
-        const pending = { descriptor: data, files };
-        pendingBundleDescriptors.set(url, pending);
-        await publishBundleDescriptor(cache, url, pending);
+        await saveBundleDescriptor(cache, request, response);
+    } else if (!(await cache.match(request))) {
+        await cache.put(request, response);
     } else {
-        if (!(await cache.match(request))) {
-            await cache.put(request, response);
-        } else {
-            await response.body?.cancel();
-        }
-        for (const [descriptorURL, pending] of pendingBundleDescriptors) {
-            if (pending.files.has(url)) {
-                await publishBundleDescriptor(cache, descriptorURL, pending);
-            }
-        }
+        await response.body?.cancel();
     }
+};
+
+const readCachedBundle = async (request, descriptor) => {
+    const cache = await caches.open(bundleCacheName);
+    const cached = await cache.match(request);
+    if (!descriptor) {
+        return cached;
+    }
+    const latestCache = await caches.open(bundleDescriptorCacheName);
+    const latest = await latestCache.match(request);
+    // With no complete version, a partial descriptor can still serve a caller
+    // that needs only CSS (or only JS). Never mix assets from different versions.
+    if (latest && (!cached || (await hasBundleFiles(cache, await latest.clone().json())))) {
+        return latest;
+    }
+    return cached;
 };
 
 const fetchBundle = async (event, descriptor) => {
@@ -183,8 +195,7 @@ const fetchBundle = async (event, descriptor) => {
         // Preserve the regular HTTP cache policy before trying Cache Storage.
         response = await fetch(event.request);
     } catch (error) {
-        const cache = await caches.open(bundleCacheName);
-        const cached = await cache.match(event.request);
+        const cached = await readCachedBundle(event.request, descriptor);
         if (cached) {
             return cached;
         }
