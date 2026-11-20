@@ -139,6 +139,32 @@ test("loading an older page again refreshes saved notes without losing surroundi
     expect(messages.hasOlder).toBe(true);
 });
 
+test("initial and paginated search results cannot overwrite saved history", async () => {
+    const cache = getChatterReadCache();
+    await cache.capture([historyRequest(42)], historyResponse(42, [10, 9]), user.context);
+    await cache.capture([historyRequest(42, { before: 9 })], historyResponse(42, [8, 7]), user.context);
+    const expected = (await cache.read(MODEL, 42)).messages;
+
+    // A filtered initial result and a subsequent search page sharing a saved history cursor.
+    await cache.capture(
+        [historyRequest(42, { search_filter: "notes", limit: undefined })],
+        historyResponse(42, [10, 9]),
+        user.context
+    );
+    await cache.capture(
+        [historyRequest(42, { before: 9, search_term: "Note 7", limit: undefined })],
+        historyResponse(42, [7]),
+        user.context
+    );
+    // A limit alone cannot establish continuity when results are filtered.
+    await cache.capture(
+        [historyRequest(42, { before: 9, search_filter: "notes" })],
+        historyResponse(42, [7]),
+        user.context
+    );
+    expect((await cache.read(MODEL, 42)).messages).toEqual(expected);
+});
+
 test("an older page can extend the saved history using a deleted message as its cursor", async () => {
     const cache = getChatterReadCache();
     await cache.capture([historyRequest(42)], historyResponse(42, [10, 9]), user.context);

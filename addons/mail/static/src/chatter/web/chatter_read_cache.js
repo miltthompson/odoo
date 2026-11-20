@@ -260,7 +260,12 @@ class ChatterReadCache {
                     pick(thread, "id", "model", "activities", "hasReadAccess", "hasWriteAccess", "canPostOnReadonly"),
                 ];
                 change.activities = structuredClone(data);
-            } else if (name === "/mail/thread/messages" && params.fetch_params?.around == null) {
+            } else if (name === "/mail/thread/messages") {
+                const { around, limit, search_filter, search_term } = params.fetch_params ?? {};
+                // Search results and jumps are not contiguous pages of the thread's history.
+                if (around != null || search_filter || search_term || !Number.isInteger(limit) || limit <= 0) {
+                    continue;
+                }
                 const ids = payload.DataResponse?.find((row) => row.id === requestId)?.messages;
                 if (Array.isArray(ids)) {
                     const data = projectRecords(payload, "mail.message", ids);
