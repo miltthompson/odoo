@@ -63,6 +63,47 @@ test("editing a legacy local draft queues a write referencing its first create",
     expect(sent[1].args).toEqual([[`offline:${sent[0].key}`], { name: "Edited draft" }]);
 });
 
+test("atomic steps are persisted and sent together after their external dependency", async () => {
+    const sent = [];
+    let rejectCreate = true;
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        sent.push(params);
+        return rejectCreate ? rejection(0, "odoo.exceptions.AccessError") : [48, true];
+    });
+    await makeTestApp();
+    const offline = getService(OfflinePlugin);
+    const create = offline.scheduleORM("res.partner", "web_save", [[], { name: "Parent" }], {});
+    const { key: createKey } = offline.getPendingEntry(create);
+    const steps = [
+        {
+            model: "res.partner", method: "create", args: [{ parent_id: `offline:${createKey}` }],
+            kwargs: { context: { active_test: false } }, refs: [createKey],
+        },
+        { model: "res.partner", method: "write", args: [["step:0"], { name: "Child" }], kwargs: {}, refs: [0] },
+    ];
+    const legacyKey = offline.scheduleORMSteps(steps, {
+        target: { model: "res.partner", ids: [42] }, label: "Create a child contact",
+    });
+    await offline._syncORM();
+    const [blocker, bundle] = offline.getPendingEntries();
+    expect(sent).toHaveLength(1);
+    expect(bundle.state).toBe("held_back");
+    expect(bundle.steps).toEqual(steps);
+    expect(bundle.refs).toEqual([createKey]);
+    expect(Object.keys(offline._ormToSync()[legacyKey].value)).toEqual([
+        "model", "method", "args", "kwargs", "extras",
+    ]);
+
+    rejectCreate = false;
+    await offline.retryPendingChange(blocker.key);
+    expect(sent.map((change) => change.key)).toEqual([createKey, createKey, bundle.key]);
+    expect(Object.keys(sent[2]).sort()).toEqual(["db", "key", "steps", "uid"]);
+    expect(sent[2].steps.map((step) => step.refs)).toEqual([[createKey], [0]]);
+    expect(sent[2].steps[0].kwargs.context.active_test).toBe(false);
+    expect(offline.getPendingEntries()).toEqual([]);
+});
+
 test("expired login pauses replay without discarding or reclassifying remaining changes", async () => {
     const sent = [];
     onRpc("/web/offline/sync", async (request) => {

@@ -302,6 +302,20 @@ export class OfflinePlugin extends Plugin {
         return legacyKey;
     }
 
+    /** Queue all steps as one change. `target` is the record affected by the whole operation. */
+    scheduleORMSteps(steps, { target, ...options }) {
+        if (!Array.isArray(steps) || !steps.length || !target?.model || !Array.isArray(target.ids)) {
+            throw new TypeError("Offline steps require a pending record target and at least one call");
+        }
+        const refs = [...new Set(steps.flatMap((step) => step.refs || []).filter((ref) => typeof ref === "string"))];
+        return this.scheduleORM(target.model, "offline_steps", [target.ids], {}, {
+            ...options, target, steps, refs,
+            // Two entries for a record may contain different calls; the compatibility key
+            // must distinguish them without putting steps in the legacy value.
+            id: options.id ?? options.key ?? window.crypto.randomUUID(),
+        });
+    }
+
     removeScheduledORM(legacyKey) {
         const entry = this.getPendingEntry(legacyKey);
         if (entry) {
@@ -573,6 +587,7 @@ export class OfflinePlugin extends Plugin {
             legacyArgs: create ? args : undefined,
             refs: create ? [create.key, ...(options.refs || [])] : options.refs || [],
             target: options.target || { model, ids: targetIds },
+            steps: options.steps,
             label: options.label || extras?.displayName || "",
             acted_at: extras?.timeStamp ?? Date.now(),
             server_version: session.registry_hash,
@@ -695,15 +710,17 @@ export class OfflinePlugin extends Plugin {
                     if (!entry) {
                         continue;
                     }
-                    const { db, uid, key, model, method, args, kwargs, refs } = entry;
+                    const { db, uid, key, model, method, args, kwargs, refs, steps } = entry;
                     let result;
                     try {
                         const xhr = new browser.XMLHttpRequest();
                         xhr.timeout = 30000;
-                        result = await rpc("/web/offline/sync", {
-                            db, uid, key, model, method, args, refs,
-                            kwargs: { ...kwargs, context: { ...user.context, ...kwargs.context } },
-                        }, { silent: true, xhr });
+                        const call = (step) => ({
+                            ...step,
+                            kwargs: { ...step.kwargs, context: { ...user.context, ...step.kwargs?.context } },
+                        });
+                        const change = steps ? { steps: steps.map(call) } : call({ model, method, args, kwargs, refs });
+                        result = await rpc("/web/offline/sync", { db, uid, key, ...change }, { silent: true, xhr });
                     } catch (error) {
                         if (error instanceof ConnectionLostError) {
                             // A lost response is not a rejection. Reuse this UUID on the next send.
