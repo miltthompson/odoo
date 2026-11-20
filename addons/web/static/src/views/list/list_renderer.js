@@ -814,9 +814,14 @@ export class ListRenderer extends Component {
             return group.list.records.length;
         }
     }
+    get displayedRecords() {
+        const list = this.props.list;
+        return list.model.filterOfflineRecords(list.records);
+    }
+
     get selectAll() {
         const list = this.props.list;
-        const nbDisplayedRecords = list.records.length;
+        const nbDisplayedRecords = this.displayedRecords.length;
         if (list.isDomainSelected) {
             return true;
         } else {
@@ -826,7 +831,7 @@ export class ListRenderer extends Component {
 
     get someSelected() {
         const list = this.props.list;
-        return list.selection.length > 0 && list.selection.length < list.records.length;
+        return list.selection.length > 0 && list.selection.length < this.displayedRecords.length;
     }
 
     computeAggregates() {
@@ -1820,7 +1825,10 @@ export class ListRenderer extends Component {
      * @param {Direction} direction
      */
     expandCheckboxes(record, direction) {
-        const { records } = this.props.list;
+        const records = this.displayedRecords;
+        if (!records.length) {
+            return false;
+        }
         if (!record && direction === "down") {
             const defaultRecord = records[0];
             this.shiftKeyedRecord = defaultRecord;
@@ -2355,7 +2363,7 @@ export class ListRenderer extends Component {
         if (!this.canSelectRecord) {
             return;
         }
-        const isRecordPresent = this.props.list.records.includes(this.lastCheckedRecord);
+        const isRecordPresent = this.displayedRecords.includes(this.lastCheckedRecord);
         if (this.shiftKeyMode && isRecordPresent) {
             this.toggleRangeSelection(record);
         } else {
@@ -2368,7 +2376,7 @@ export class ListRenderer extends Component {
      * @param {RelationalRecord} record
      */
     toggleRangeSelection(record) {
-        const { records } = this.props.list;
+        const records = this.displayedRecords;
         const recordIndex = records.indexOf(record);
         const lastCheckedRecordIndex = records.indexOf(this.lastCheckedRecord);
         const start = Math.min(recordIndex, lastCheckedRecordIndex);

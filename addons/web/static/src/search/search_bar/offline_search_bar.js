@@ -1,12 +1,11 @@
 import { onWillRender } from "@web/owl2/utils";
 import { useAutofocus, useService } from "@web/core/utils/hooks";
-import { Component, onWillStart, onWillUnmount, proxy, signal, t, useProps } from "@odoo/owl";
+import { Component, onWillStart, proxy, signal, t, useProps } from "@odoo/owl";
 import { Dropdown } from "@web/core/dropdown/dropdown";
 import { useDropdownState } from "@web/core/dropdown/dropdown_hooks";
 import { DropdownItem } from "@web/core/dropdown/dropdown_item";
 import { fuzzyLookup } from "@web/core/utils/search";
 import { useHotkey } from "@web/core/hotkeys/hotkey_hook";
-import { normalize } from "@web/core/l10n/utils";
 
 const INITIAL_SEARCH_LIMIT = 8;
 
@@ -47,8 +46,6 @@ export class OfflineSearchBar extends Component {
             limit: INITIAL_SEARCH_LIMIT,
         });
 
-        this.localQuery = signal("");
-        onWillUnmount(() => this.props.model?.offlineSearch.set(""));
         onWillStart(async () => {
             this.allSearches = await this.env.searchModel.getAvailableOfflineSearches();
             this.emptySearch = this.allSearches.find((search) => !search.facets.length) || null;
@@ -90,8 +87,7 @@ export class OfflineSearchBar extends Component {
 
     onLocalSearchInput(ev) {
         if (!ev.isComposing) {
-            this.localQuery.set(ev.target.value);
-            this.props.model.offlineSearch.set(normalize(ev.target.value.trim()));
+            return this.props.model.setOfflineSearch(ev.target.value);
         }
     }
 

@@ -18,6 +18,12 @@ function decrypt(algorithm, key, data) {
     return Promise.resolve($encode(data.replace("encrypted data:", "")));
 }
 
+/** @type {SubtleCrypto["digest"]} */
+function digest(algorithm, data) {
+    // Preserve distinct inputs without requiring a secure context for the test runner.
+    return Promise.resolve(new Uint8Array(data).slice().buffer);
+}
+
 /** @type {SubtleCrypto["encrypt"]} */
 function encrypt(algorithm, key, data) {
     return Promise.resolve(`encrypted data:${$decode(data)}`);
@@ -65,6 +71,7 @@ export const mockCrypto = {
     randomUUID,
     subtle: {
         decrypt,
+        digest,
         encrypt,
         importKey,
     },

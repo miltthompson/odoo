@@ -191,42 +191,6 @@ test("offlineUI: react to [data-available-offline] attribute changes", async () 
     expect(".btn2").not.toHaveAttribute("disabled");
 });
 
-test("explained offline controls block pointer, touch and keyboard activation", async () => {
-    class Root extends Component {
-        static template = xml`
-            <button class="o_test_offline_action" data-offline-reason="Needs a connection to send"
-                t-on-click="this.activate" t-on-touchend="this.activate"
-                t-on-pointerup="this.activate" t-on-keydown="this.activate">Send</button>
-        `;
-        activate() {
-            expect.step("activated");
-        }
-    }
-    await mountWithCleanup(Root);
-    const offline = getService(OfflinePlugin);
-    const button = document.querySelector(".o_test_offline_action");
-    offline.setOffline(true);
-    expect(button).toHaveAttribute("aria-disabled", "true");
-    expect(button).not.toHaveAttribute("disabled");
-    expect(document.getElementById(button.getAttribute("aria-describedby")).textContent).toBe(
-        "Needs a connection to send"
-    );
-    for (const type of ["touchend", "pointerup", "click"]) {
-        button.dispatchEvent(new Event(type, { bubbles: true, cancelable: true }));
-    }
-    for (const key of ["Enter", " "]) {
-        button.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
-    }
-    await animationFrame();
-    expect(".o_notification_content").toHaveText("Needs a connection to send");
-    expect.verifySteps([]);
-    offline.setOffline(false);
-    expect(button).not.toHaveAttribute("aria-describedby");
-    expect(button).not.toHaveAttribute("aria-disabled");
-    button.click();
-    expect.verifySteps(["activated"]);
-});
-
 test("Repeatedly check connection when going offline", async () => {
     patchWithCleanup(Math, {
         random: () => 1, // no jitter

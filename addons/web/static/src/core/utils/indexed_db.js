@@ -65,12 +65,12 @@ export class IndexedDB {
      * @param {number} scanLimit The maximum number of entries to examine.
      * @returns {Promise<any>} The matching records.
      */
-    async search(table, searchFn, limit = 8, scanLimit = Infinity) {
+    async search(table, searchFn, limit = 8, scanLimit = Infinity, keyRange = null) {
         this._tables.add(table);
         return this.mutex.exec(() =>
             this._execute((db) => {
                 if (db) {
-                    return this._search(db, table, searchFn, limit, scanLimit);
+                    return this._search(db, table, searchFn, limit, scanLimit, keyRange);
                 }
             })
         );
@@ -366,11 +366,11 @@ export class IndexedDB {
         });
     }
 
-    async _search(db, table, searchFn, limit, scanLimit) {
+    async _search(db, table, searchFn, limit, scanLimit, keyRange) {
         const results = [];
         let remaining = scanLimit;
         let batchSize = Math.min(BATCH_SIZE, remaining);
-        let nextBatchPromise = this._getAllEntries(db, table, null, batchSize);
+        let nextBatchPromise = this._getAllEntries(db, table, keyRange, batchSize);
 
         // eslint-disable-next-line no-constant-condition
         while (true) {
@@ -378,9 +378,15 @@ export class IndexedDB {
 
             // Pre-fetch the next batch while processing the current one.
             remaining -= records.length;
-            const hasMore = records.length === batchSize && remaining > 0;
+            const lastKey = records.at(-1)?.key;
+            const upper = keyRange?.upper;
+            const hasMore =
+                records.length === batchSize && remaining > 0 &&
+                (upper === undefined || indexedDB.cmp(lastKey, upper) < 0);
             if (hasMore) {
-                const query = IDBKeyRange.lowerBound(records.at(-1).key, true);
+                const query = upper === undefined
+                    ? IDBKeyRange.lowerBound(lastKey, true)
+                    : IDBKeyRange.bound(lastKey, upper, true, keyRange.upperOpen);
                 batchSize = Math.min(BATCH_SIZE, remaining);
                 nextBatchPromise = this._getAllEntries(db, table, query, batchSize);
             }

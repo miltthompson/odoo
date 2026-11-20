@@ -75,7 +75,7 @@ export class DynamicList extends DataPoint {
      * of records. This property should not be accessed in a loop.
      */
     get selection() {
-        return this.records.filter((record) => record.selected);
+        return this.model.filterOfflineRecords(this.records).filter((record) => record.selected);
     }
 
     // -------------------------------------------------------------------------
@@ -186,7 +186,11 @@ export class DynamicList extends DataPoint {
     }
 
     selectDomain(value) {
-        return this.model.mutex.exec(() => this._selectDomain(value));
+        return this.model.mutex.exec(() => {
+            if (!value || !this.model.hasOfflineSearch) {
+                this._selectDomain(value);
+            }
+        });
     }
 
     sortBy(fieldName) {
@@ -598,7 +602,7 @@ export class DynamicList extends DataPoint {
         if (this.isDomainSelected || this.selection.length > 0) {
             this._unselectAll();
         } else {
-            this.records.forEach((record) => {
+            this.model.filterOfflineRecords(this.records).forEach((record) => {
                 record._toggleSelection(true);
             });
         }
@@ -609,8 +613,10 @@ export class DynamicList extends DataPoint {
     }
 
     _unselectAll() {
-        this.selection.forEach((record) => {
-            record._toggleSelection(false);
+        this.records.forEach((record) => {
+            if (record.selected) {
+                record._toggleSelection(false);
+            }
         });
         this._selectDomain(false);
     }

@@ -15,6 +15,7 @@ export class SearchBarToggler extends Component {
     static template = "web.SearchBar.Toggler";
     props = useProps({
         isSmall: t.boolean(),
+        canSearchSavedRecords: t.boolean().optional(false),
         showSearchBar: t.boolean(),
         toggleSearchBar: t.function(),
     });
