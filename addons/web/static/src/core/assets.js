@@ -65,6 +65,23 @@ function onLoadAndError(el, onLoad, onError) {
 
 whenReady(computeAssetCaches);
 
+function getOfflineBundleCache() {
+    const { serviceWorker } = window.navigator;
+    if (
+        session.db &&
+        serviceWorker &&
+        !serviceWorker.controller &&
+        /^(?:\/odoo(?:\/|$)|\/scoped_app\/)/.test(location.pathname)
+    ) {
+        // Fetches that started before registration were not seen by the worker.
+        return (data) => {
+            serviceWorker.ready
+                .then(({ active }) => active?.postMessage({ type: "cache_bundle", ...data }))
+                .catch(() => {});
+        };
+    }
+}
+
 /** @type {typeof assets["getBundle"]} */
 export function getBundle() {
     return assets.getBundle(...arguments);
@@ -122,12 +139,16 @@ export const assets = {
             // Keep offline bundle descriptors tied to the database and registry that loaded them.
             url.searchParams.set("registry_hash", session.registry_hash);
         }
+        const cacheOfflineBundle = getOfflineBundleCache();
         const promise = fetch(url)
             .then(async (response) => {
                 const cssLibs = [];
                 const jsLibs = [];
                 if (!response.bodyUsed) {
                     const result = await response.json();
+                    if (response.ok && !response.redirected) {
+                        cacheOfflineBundle?.({ url: url.href, descriptor: result });
+                    }
                     for (const { src, type } of Object.values(result)) {
                         if (type === "link" && src) {
                             cssLibs.push(src);
@@ -165,6 +186,7 @@ export const assets = {
                 )} as ${typeof bundleName}`
             );
         }
+        const cacheOfflineBundle = getOfflineBundleCache();
         return getBundle(bundleName).then(({ cssLibs, jsLibs }) => {
             const promises = [];
             if (options?.css ?? true) {
@@ -177,7 +199,12 @@ export const assets = {
                     promises.push(assets.loadJS(url, options));
                 }
             }
-            return Promise.all(promises);
+            return Promise.all(promises).then((elements) => {
+                cacheOfflineBundle?.({
+                    bundles: elements.map((element) => element?.src || element?.href),
+                });
+                return elements;
+            });
         });
     },
 

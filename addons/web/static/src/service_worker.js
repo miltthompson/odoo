@@ -101,17 +101,21 @@ const navigateOrDisplayOfflinePage = async (event, url) => {
         }
         throw requestError;
     }
-    if (canSave && response.ok && !response.redirected) {
-        event.waitUntil(savePage(response.clone(), generation).catch(() => {}));
-    } else if (
-        generation === pageGeneration &&
-        response.redirected &&
-        new URL(response.url).pathname === "/web/login"
-    ) {
-        event.waitUntil(clearSavedPage().catch(() => {}));
+    if (isWebclientURL(url) && generation === pageGeneration) {
+        if (invalidatesSavedPage(response)) {
+            event.waitUntil(clearSavedPage().catch(() => {}));
+        } else if (canSave && response.ok && !response.redirected) {
+            event.waitUntil(savePage(response.clone(), generation).catch(() => {}));
+        }
     }
     return response;
 };
+
+const invalidatesSavedPage = (response) =>
+    // The browser follows a manual navigation redirect itself. Its target is
+    // hidden from the worker, so we cannot rule out a redirect to login.
+    response.type === "opaqueredirect" ||
+    (response.redirected && new URL(response.url).pathname === "/web/login");
 
 const isBundleFile = (url) =>
     url.origin === self.location.origin &&
@@ -153,12 +157,10 @@ const fetchBundle = async (event, descriptor) => {
     return response;
 };
 
-const primeWebclient = async ({ url, bundles }) => {
-    const pageURL = new URL(url, self.location.origin);
-    if (!isWebclientURL(pageURL) || usesDebugAssets(pageURL) || !Array.isArray(bundles)) {
+const primeBundleFiles = async (bundles) => {
+    if (!Array.isArray(bundles)) {
         return;
     }
-    const generation = pageGeneration;
     async function copyBundle(bundle) {
         if (typeof bundle !== "string") {
             return;
@@ -171,10 +173,41 @@ const primeWebclient = async ({ url, bundles }) => {
             await saveBundle(bundleURL.href, response, false);
         }
     }
-    await Promise.allSettled([
-        fetch(pageURL).then((response) => savePage(response, generation)),
-        ...Array.from(new Set(bundles), copyBundle),
+    await Promise.allSettled(Array.from(new Set(bundles), copyBundle));
+};
+
+const primeWebclient = async ({ url, bundles }) => {
+    const pageURL = new URL(url, self.location.origin);
+    if (!isWebclientURL(pageURL) || usesDebugAssets(pageURL)) {
+        return;
+    }
+    const generation = pageGeneration;
+    await Promise.all([
+        fetch(pageURL).then((response) => {
+            if (generation === pageGeneration && invalidatesSavedPage(response)) {
+                return clearSavedPage();
+            }
+            return savePage(response, generation);
+        }),
+        primeBundleFiles(bundles),
     ]);
+};
+
+const primeBundle = async ({ source, data: { url, descriptor, bundles } }) => {
+    if (source?.type !== "window" || !isWebclientURL(new URL(source.url))) {
+        return;
+    }
+    if (Array.isArray(descriptor) && typeof url === "string") {
+        const descriptorURL = new URL(url, self.location.origin);
+        if (isBundleDescriptor(descriptorURL)) {
+            const cache = await caches.open(bundleCacheName);
+            // Do not replace a potentially newer response from a controlled visit.
+            if (!(await cache.match(descriptorURL.href))) {
+                await cache.put(descriptorURL.href, Response.json(descriptor));
+            }
+        }
+    }
+    await primeBundleFiles(bundles);
 };
 
 const serveShareTarget = (event) => {
@@ -297,6 +330,10 @@ const waitingMessage = async (message, clientId = false, { signal } = {}) => {
 self.addEventListener("message", (event) => {
     if (event.data?.type === "cache_webclient") {
         event.waitUntil(primeWebclient(event.data).catch(() => {}));
+        return;
+    }
+    if (event.data?.type === "cache_bundle") {
+        event.waitUntil(primeBundle(event).catch(() => {}));
         return;
     }
     if (typeof event.data !== "string") {

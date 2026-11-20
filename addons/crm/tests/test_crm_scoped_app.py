@@ -22,17 +22,29 @@ class TestCrmScopedApp(HttpCase):
         self.assertEqual(response.headers['Service-Worker-Allowed'], '/scoped_app')
 
     def test_crm_scoped_worker_caches_pipeline_bundles(self):
+        self._check_pipeline_bundles('/scoped_app/crm')
+
+    def test_crm_main_worker_primes_uncontrolled_lazy_bundles(self):
+        self._check_pipeline_bundles('/odoo/crm')
+
+    def _check_pipeline_bundles(self, path):
         self.env.ref('base.user_admin').tour_enabled = False
-        self.browser_js('/scoped_app/crm', """
+        scoped = 'true' if path.startswith('/scoped_app/') else 'false'
+        script = """
             (async () => {
                 const { serviceWorker } = navigator;
-                if (!serviceWorker.controller) {
-                    await new Promise((resolve) => {
-                        serviceWorker.addEventListener('controllerchange', resolve, { once: true });
-                    });
-                }
-                if (!serviceWorker.controller.scriptURL.endsWith('/web/scoped-app-service-worker.js')) {
-                    throw new Error('The CRM pipeline is not controlled by the scoped worker');
+                const scoped = IS_SCOPED;
+                if (scoped) {
+                    if (!serviceWorker.controller) {
+                        await new Promise((resolve) => {
+                            serviceWorker.addEventListener('controllerchange', resolve, { once: true });
+                        });
+                    }
+                    if (!serviceWorker.controller.scriptURL.endsWith('/web/scoped-app-service-worker.js')) {
+                        throw new Error('The CRM pipeline is not controlled by the scoped worker');
+                    }
+                } else if (serviceWorker.controller) {
+                    throw new Error('Expected the first main webclient visit to be uncontrolled');
                 }
                 const { loadBundle, getBundle } = odoo.loader.modules.get('@web/core/assets');
                 const bundle = 'web.assets_backend_lazy';
@@ -62,11 +74,28 @@ class TestCrmScopedApp(HttpCase):
                     (url) => waitForCacheEntry(cache, url)
                 ));
                 const pageCache = await caches.open('odoo-sw-cache');
-                const page = await waitForCacheEntry(pageCache, '/scoped_app');
+                const page = await waitForCacheEntry(pageCache, scoped ? '/scoped_app' : '/odoo');
                 const shell = await page.text();
                 if (!shell.includes('@@@session_info_secret@@@') || shell.includes('browser_cache_secret')) {
                     throw new Error('The saved shell contains session information');
                 }
+                if (scoped) {
+                    const response = await fetch('/scoped_app/crm?redirect=/odoo/crm', {
+                        redirect: 'manual',
+                        headers: { Accept: 'text/html' },
+                    });
+                    if (response.type !== 'opaqueredirect') {
+                        throw new Error('Expected the original opaque redirect from the server');
+                    }
+                    const deadline = performance.now() + 5000;
+                    while (await pageCache.match('/scoped_app')) {
+                        if (performance.now() >= deadline) {
+                            throw new Error('The scoped shell was not cleared after the redirect');
+                        }
+                        await new Promise(requestAnimationFrame);
+                    }
+                }
                 console.log('test successful');
             })().catch(console.error);
-        """, ready="odoo.isReady && !!document.querySelector('.o_opportunity_kanban')", login='admin')
+        """.replace('IS_SCOPED', scoped)
+        self.browser_js(path, script, ready="odoo.isReady && !!document.querySelector('.o_opportunity_kanban')", login='admin')
