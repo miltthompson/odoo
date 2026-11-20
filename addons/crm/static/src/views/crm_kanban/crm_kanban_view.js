@@ -1,4 +1,6 @@
+import { onMounted, onWillUnmount } from "@odoo/owl";
 import { registry } from "@web/core/registry";
+import { useService } from "@web/core/utils/hooks";
 import { CrmControlPanel } from "@crm/views/crm_control_panel";
 import { CrmKanbanModel } from "@crm/views/crm_kanban/crm_kanban_model";
 import { CrmKanbanArchParser } from "@crm/views/crm_kanban/crm_kanban_arch_parser";
@@ -15,7 +17,66 @@ export const crmKanbanView = {
         static components = {
             ...rottingKanbanView.Controller.components,
             LeadGenerationDropdown,
+        };
+
+        setup() {
+            super.setup();
+            if (this.env.config.actionXmlId !== "crm.crm_lead_action_pipeline") {
+                return;
+            }
+            const view = useService("view");
+            const action = useService("action");
+            let cancel;
+            onMounted(() => {
+                if (!view.canPrefetchViews()) {
+                    return;
+                }
+                const prefetch = () => this.prefetchPipelineViews(view, action);
+                if (window.requestIdleCallback) {
+                    const id = window.requestIdleCallback(prefetch);
+                    cancel = () => window.cancelIdleCallback(id);
+                } else {
+                    const id = window.setTimeout(prefetch, 100);
+                    cancel = () => window.clearTimeout(id);
+                }
+            });
+            onWillUnmount(() => cancel?.());
         }
+
+        prefetchPipelineViews(view, action) {
+            if (!view.canPrefetchViews()) {
+                return;
+            }
+            const { actionId, views } = this.env.config;
+            const { context, resModel } = this.props;
+            const quickCreateView = this.props.archInfo.quickCreateView;
+            const requests = [
+                // get_views returns all layouts in the action, including Kanban, form and activity.
+                view.prefetchViews({ context, resModel, views }, {
+                    actionId,
+                    loadActionMenus: true,
+                    loadIrFilters: views.some(([, type]) => type === "search"),
+                }),
+                view.prefetchViews({ resModel: "mail.activity.schedule", views: [[false, "form"]] }),
+                action
+                    .loadAction("crm.crm_lead_lost_action", { active_ids: [] }, { silent: true })
+                    .then((lost) => view.prefetchViews({
+                        context: lost.context,
+                        resModel: lost.res_model,
+                        views: lost.views,
+                    }, { actionId: lost.id })),
+            ];
+            if (quickCreateView) {
+                requests.push(view.prefetchViews({
+                    context: { ...context, form_view_ref: quickCreateView },
+                    resModel,
+                    views: [[false, "form"]],
+                }));
+            }
+            // This is best-effort and deliberately does not delay or interrupt the pipeline.
+            return Promise.allSettled(requests);
+        }
+
         get progressBarAggregateFields() {
             const res = super.progressBarAggregateFields;
             const progressAttributes = this.props.archInfo.progressAttributes;

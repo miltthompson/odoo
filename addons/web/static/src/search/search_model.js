@@ -68,6 +68,7 @@ const { DateTime } = luxon;
  *  facets: Object[];
  *  domain: string;
  *  groupBys: string[];
+ *  saveEmptyOffline?: boolean;
  * }} Search
  */
 
@@ -756,6 +757,11 @@ export class SearchModel extends EventBus {
             domain,
             groupBys,
         };
+    }
+
+    getAvailableOfflineSearches() {
+        const { actionId, viewType } = this.env.config;
+        return this.offlinePlugin.getAvailableSearches(actionId, viewType);
     }
 
     getIrFilterValues(params) {

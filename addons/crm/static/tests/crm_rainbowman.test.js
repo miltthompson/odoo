@@ -8,7 +8,28 @@ import {
     mountView,
     onRpc,
 } from "@web/../tests/web_test_helpers";
+import { checkRainbowmanMessage } from "@crm/views/check_rainbowman_message";
 import { serializeDateTime } from "@web/core/l10n/dates";
+import { ConnectionLostError } from "@web/core/network/rpc";
+
+test("skip the decorative rainbow effect offline or if the connection drops", async () => {
+    let offline = true;
+    const model = {
+        offlinePlugin: { isOffline: () => offline },
+        orm: {
+            async call(_model, method) {
+                expect.step(method);
+                throw new ConnectionLostError();
+            },
+        },
+        effect: { add: () => expect.step("effect") },
+    };
+    await checkRainbowmanMessage(model, 1);
+    await expect.waitForSteps([]);
+    offline = false;
+    await checkRainbowmanMessage(model, 1);
+    await expect.waitForSteps(["get_rainbowman_message"]);
+});
 
 const now = luxon.DateTime.now();
 class Users extends models.Model {

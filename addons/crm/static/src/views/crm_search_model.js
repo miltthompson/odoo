@@ -1,9 +1,20 @@
 import { browser } from "@web/core/browser/browser";
 import { Domain } from "@web/core/domain";
 import { _t } from "@web/core/l10n/translation";
+import { ConnectionLostError, rpcBus } from "@web/core/network/rpc";
+import { user } from "@web/core/user";
+import { session } from "@web/session";
 import { SearchModel } from "@web/search/search_model";
 
 import { computed, proxy } from "@odoo/owl";
+
+function teamStorageKey() {
+    return `crm.switcher_team_id:${JSON.stringify([session.db, user.userId])}`;
+}
+
+rpcBus.addEventListener("WEBCLIENT:LOGOUT", () => {
+    browser.localStorage.removeItem(teamStorageKey());
+});
 
 export class CrmSearchModel extends SearchModel {
 
@@ -45,6 +56,14 @@ export class CrmSearchModel extends SearchModel {
         this._actionContext = config.context;
         await this._initSwitcher(config);
         await super.load(config);
+        if (this.isTeamSwitcherEnabled && this.offlinePlugin.isOffline() &&
+            !config.state?.teamSwitcherState) {
+            const saved = await this.getSavedTeamSearches();
+            const search = saved.get(this.state.switcherTeamId);
+            if (search) {
+                this.applySearch(search);
+            }
+        }
     }
 
     /**
@@ -139,7 +158,13 @@ export class CrmSearchModel extends SearchModel {
                     }
                 },
             })
-            .call("crm.team", "get_team_switcher_data");
+            .call("crm.team", "get_team_switcher_data")
+            .catch((error) => {
+                if (error instanceof ConnectionLostError) {
+                    return { available: false, teams: [] };
+                }
+                throw error;
+            });
         this.state.switcherAvailable = available;
         this.state.switcherTeams = teams;
         this._initSwitcherSelection();
@@ -150,7 +175,8 @@ export class CrmSearchModel extends SearchModel {
      * the local storage or fallback on "All Teams".
      */
     _initSwitcherSelection(loaded=false) {
-        let teamId = JSON.parse(browser.localStorage.getItem("crm.switcher_team_id"));
+        const storedId = browser.localStorage.getItem(teamStorageKey());
+        let teamId = storedId === null ? undefined : Number(storedId);
         const isValid = this.state.switcherTeams.find((t) => t.id === teamId);
         if (!isValid) {
             // Fallback on "All Teams"
@@ -198,9 +224,9 @@ export class CrmSearchModel extends SearchModel {
         this.state.switcherTeamId = teamId;
         this._updateActionContext(teamId);
         if (teamId) {
-            browser.localStorage.setItem("crm.switcher_team_id", JSON.stringify(teamId));
+            browser.localStorage.setItem(teamStorageKey(), String(teamId));
         } else {
-            browser.localStorage.removeItem("crm.switcher_team_id");
+            browser.localStorage.removeItem(teamStorageKey());
         }
         if (notify) {
             this._notify();
@@ -217,9 +243,12 @@ export class CrmSearchModel extends SearchModel {
      */
     applySearch(search) {
         // Restore the search (without the team)
-        this.blockNotification = true; // Prevent notify
-        super.applySearch({ ...search, facets: search.facets.filter((f) => !f.isTeamFacet) });
-        this.blockNotification = false;
+        this.blockNotification = true; // Notify once, after restoring both the search and the team.
+        try {
+            super.applySearch({ ...search, facets: search.facets.filter((f) => !f.isTeamFacet) });
+        } finally {
+            this.blockNotification = false;
+        }
         // Restore the team
         if (search.teamId !== this.state.switcherTeamId) {
             this._updateSwitcherSelection(search.teamId);
@@ -228,24 +257,51 @@ export class CrmSearchModel extends SearchModel {
         this._notify();
     }
 
-    /**
-     * @override
-     * In offline mode, the team switcher dropdown is disabled to reduce complexity.
-     * Instead, showing the current search selected team in the search facets.
-     */
+    async getAvailableOfflineSearches() {
+        const searches = await super.getAvailableOfflineSearches();
+        if (!this.showTeamSwitcher) {
+            return searches;
+        }
+        const scope = this.teamSearchScope();
+        const authorizedIds = new Set(this.state.switcherTeams.map(({ id }) => id));
+        return searches.filter((search) => search.teamScope === scope &&
+            (!search.teamId || authorizedIds.has(search.teamId)));
+    }
+
+    async getSavedTeamSearches() {
+        const teams = new Map();
+        for (const search of await this.getAvailableOfflineSearches()) {
+            if (!teams.has(search.teamId)) {
+                teams.set(search.teamId, search);
+            }
+        }
+        return teams;
+    }
+
+    teamSearchScope(context = this._getContext()) {
+        return JSON.stringify([
+            session.db, user.userId, context.allowed_company_ids ?? user.context.allowed_company_ids,
+        ]);
+    }
+
+    /** Keep the team facet for the saved-search menu and associate it with its owner and companies. */
     getCurrentSearch() {
         const search = super.getCurrentSearch();
-        const team = this.switcherTeam();
-        if (!team) {
+        if (!this.showTeamSwitcher) {
             return search;
         }
+        const team = this.switcherTeam();
+        const teamScope = this.teamSearchScope();
         return {
             ...search,
-            facets: [
-                ...search.facets,
+            key: search.teamScope ? search.key : `${search.key}:${teamScope}:${team?.id || 0}`,
+            facets: team ? [
+                ...search.facets.filter((facet) => !facet.isTeamFacet),
                 { type: "field", icon: "filter_alt", title: _t("Team"), values: [team.name], isTeamFacet: true },
-            ],
-            teamId: team.id,
+            ] : search.facets.filter((facet) => !facet.isTeamFacet),
+            teamScope,
+            teamId: team?.id,
+            saveEmptyOffline: true,
         };
     }
 };
