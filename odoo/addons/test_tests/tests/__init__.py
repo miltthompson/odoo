@@ -1,3 +1,4 @@
+from . import test_browser_network
 from . import test_cases
 from . import test_form
 from . import test_freeze_time

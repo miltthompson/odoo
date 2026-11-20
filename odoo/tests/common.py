@@ -81,6 +81,7 @@ from odoo.tools.xml_utils import _validate_xml
 
 import odoo.addons.base
 from . import case, test_cursor
+from .browser_network import BrowserNetworkRelay
 
 if typing.TYPE_CHECKING:
     from collections.abc import Iterable
@@ -2022,6 +2023,10 @@ class ChromeBrowser:
         except concurrent.futures.TimeoutError:
             raise TimeoutError(f'{method}({params or ""})')
 
+    def stop_service_workers(self):
+        """Stop running service workers without unregistering or clearing their caches."""
+        self._websocket_request('ServiceWorker.stopAllWorkers')
+
     def _websocket_send(self, method, *, params=None, with_future=False):
         """send chrome devtools protocol commands through websocket
 
@@ -2603,6 +2608,7 @@ class JsonRpcException(Exception):
 class HttpCase(TransactionCase):
     """ Transactional HTTP TestCase with url_open and Chrome headless helpers. """
     browser = None
+    network = None
     browser_size = '1366x768'
     touch_enabled = False
     session: OdooHttpSession = None
@@ -2661,6 +2667,19 @@ class HttpCase(TransactionCase):
             self.startPatcher(
                 patch.object(report_model, '_run_wkhtmltopdf', _patched_run_wkhtmltopdf),
             )
+
+    def start_network_relay(self, *, slow_delay=0.5):
+        """Route subsequent browser_js/start_tour calls through a dedicated local origin.
+
+        Use ``self.network.set_mode(...)`` to change the connection. Python HTTP
+        helpers and Chrome DevTools continue to connect directly. The relay and
+        its origin are kept until test cleanup, including across browser calls.
+        """
+        if self.network is not None:
+            raise RuntimeError('Browser network relay already started')
+        self.network = self.enterContext(BrowserNetworkRelay(HOST, self.http_port(), slow_delay=slow_delay))
+        self.addCleanup(setattr, self, 'network', None)
+        return self.network
 
     @contextmanager
     def allow_pdf_render(self):
@@ -2940,6 +2959,13 @@ class HttpCase(TransactionCase):
 
             self.authenticate(login, login, browser=browser)
             url = urljoin(self.base_url(), url_path)
+            if self.network is not None:
+                atexit.enter_context(patch.object(self, 'browser', browser))
+                origin = urlsplit(self.base_url())
+                target = urlsplit(url)
+                if (target.scheme, target.netloc) == (origin.scheme, origin.netloc):
+                    relay = urlsplit(self.network.url)
+                    url = target._replace(scheme=relay.scheme, netloc=relay.netloc).geturl()
             if watch:
                 parsed = urlsplit(url)
                 qs = dict(parse_qsl(parsed.query))
