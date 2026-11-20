@@ -14,7 +14,7 @@ import { NonSecureContextError } from "@web/core/errors/non_secure_context_error
 import { _t } from "@web/core/l10n/translation";
 import { normalize } from "@web/core/l10n/utils";
 import { ConnectionLostError, rpc, rpcBus } from "@web/core/network/rpc";
-import { OfflineQueueStore, clearLegacyReadStores, offlineDatabaseName, quarantineLegacyQueue } from "./offline_storage";
+import { OfflineQueueStore, clearLegacyReadStores, offlineDatabaseName } from "./offline_storage";
 import { isOfflineRecordId, offlineRecordRef } from "./offline_id";
 import { user } from "@web/core/user";
 import { registry } from "@web/core/registry";
@@ -59,7 +59,6 @@ export class OfflinePlugin extends Plugin {
         new Crypto(session.browser_cache_secret);
     _queue = null;
     _pending = signal([]);
-    _legacyCount = signal(0);
     syncPaused = signal(false);
     _queueFailure = signal(null);
     _writes = Promise.resolve();
@@ -119,7 +118,6 @@ export class OfflinePlugin extends Plugin {
             this._queueReady = Promise.all([
                 this._queue.keyReady,
                 this._queue.lock(() => this._refreshQueue()),
-                quarantineLegacyQueue().then((count) => this._legacyCount.set(count)),
             ]).catch(() => this._reportStorageError());
             this._syncTimeout = browser.setTimeout(() => this._syncORM(), 3000);
         }
@@ -330,7 +328,7 @@ export class OfflinePlugin extends Plugin {
     }
 
     get hasScheduledCalls() {
-        return !!Object.keys(this._ormToSync()).length || !!this._legacyCount() || !!this.getQueueError();
+        return !!Object.keys(this._ormToSync()).length || !!this.getQueueError();
     }
 
     /** The durable queue in send order. `key` is the sync UUID, not the compatibility key. */
@@ -360,10 +358,6 @@ export class OfflinePlugin extends Plugin {
 
     getQueueReady() {
         return this._queueReady;
-    }
-
-    getLegacyPendingCount() {
-        return this._legacyCount();
     }
 
     getQueueError() {
