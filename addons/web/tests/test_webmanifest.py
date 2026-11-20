@@ -85,6 +85,51 @@ class WebManifestRoutesTest(HttpCaseWithUserDemo):
         self.assertEqual(response.headers["Content-Type"], "text/javascript")
         self.assertEqual(response.headers["Service-Worker-Allowed"], "/odoo")
 
+    def test_offline_descriptor_lookup_during_refresh(self):
+        self.browser_js("/odoo/offline", """
+            const workerURL = URL.createObjectURL(new Blob([`
+                // Use the real worker code and Cache Storage; control only the order of the reads.
+                self.registration = { scope: self.location.origin + '/odoo' };
+                importScripts(self.location.origin + '/web/service-worker.js');
+                (async () => {
+                    const request = new Request(self.location.origin + '/web/bundle/test?registry_hash=test');
+                    const oldScript = self.location.origin + '/web/assets/abcdef0/test.min.js';
+                    const newScript = self.location.origin + '/web/assets/abcdef1/test.min.js';
+                    const bundle = (src) => Response.json([{ type: 'script', src }]);
+                    const cache = await caches.open(bundleCacheName);
+                    await cache.put(oldScript, new Response('// cached script'));
+                    await saveBundleDescriptor(cache, request, bundle(oldScript));
+
+                    const match = Cache.prototype.match;
+                    let refreshed = false;
+                    Cache.prototype.match = async function (key) {
+                        const response = await match.call(this, key);
+                        if (!refreshed && key === request) {
+                            refreshed = true;
+                            await saveBundleDescriptor(cache, request, bundle(newScript));
+                        }
+                        return response;
+                    };
+                    const [entry] = await (await readCachedBundle(request, true)).json();
+                    if (!refreshed || entry.src !== oldScript) {
+                        throw new Error('Overlapping descriptor refresh hid the usable cached bundle');
+                    }
+                    self.postMessage('test successful');
+                })().catch((error) => self.postMessage(error.message));
+            `], { type: 'text/javascript' }));
+            const worker = new Worker(workerURL);
+            worker.onmessage = ({ data }) => {
+                worker.terminate();
+                URL.revokeObjectURL(workerURL);
+                if (data === 'test successful') {
+                    console.log(data);
+                } else {
+                    console.error(data);
+                }
+            };
+            worker.onerror = (event) => console.error(event.message);
+        """)
+
     def test_offline_url(self):
         """
         This route returns the offline page
