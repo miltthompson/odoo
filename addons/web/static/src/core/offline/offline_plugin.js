@@ -14,7 +14,7 @@ import { NonSecureContextError } from "@web/core/errors/non_secure_context_error
 import { _t } from "@web/core/l10n/translation";
 import { normalize } from "@web/core/l10n/utils";
 import { ConnectionLostError, rpc, rpcBus } from "@web/core/network/rpc";
-import { OfflineQueueStore, clearLegacyReadStores, offlineDatabaseName, withLegacyQueue } from "./offline_storage";
+import { OfflineQueueStore, clearLegacyReadStores, offlineDatabaseName, quarantineLegacyQueue } from "./offline_storage";
 import { user } from "@web/core/user";
 import { registry } from "@web/core/registry";
 import { services } from "@web/core/services";
@@ -118,8 +118,8 @@ export class OfflinePlugin extends Plugin {
             this._queueReady = Promise.all([
                 this._queue.keyReady,
                 this._queue.lock(() => this._refreshQueue()),
+                quarantineLegacyQueue().then((count) => this._legacyCount.set(count)),
             ]).catch(() => this._reportStorageError());
-            this._readLegacyCount().catch(() => this._reportStorageError());
             this._syncTimeout = browser.setTimeout(() => this._syncORM(), 3000);
         }
 
@@ -385,34 +385,6 @@ export class OfflinePlugin extends Plugin {
         return this._syncORM();
     }
 
-    /** Only call after the user has explicitly confirmed ownership (or confirmed discard). */
-    async resolveLegacyChanges(send) {
-        await this._enqueueWrite(() => withLegacyQueue(async (rows, legacy, table) => {
-            const mine = rows.filter(({ claim }) => !claim || claim.owner === this._queue.name);
-            const entries = send ? await Promise.all(mine.map(async (row) => ({
-                ...row,
-                value: await row.crypto.decrypt(row.payload),
-            }))) : mine;
-            const existing = new Set((await this._queue.list()).map((entry) => entry.key));
-            entries.sort((a, b) => (a.value?.extras?.timeStamp || 0) - (b.value?.extras?.timeStamp || 0));
-            for (const { key, value, payload, claim } of entries) {
-                if (send) {
-                    const entry = this._makeEntry(key, value, { key: claim?.key });
-                    if (!claim) {
-                        await legacy.write(table, key, { payload, claim: { owner: this._queue.name, key: entry.key } });
-                    }
-                    if (!existing.has(entry.key)) {
-                        await this._queue.add(entry);
-                    }
-                }
-                await legacy.delete(table, key);
-            }
-            await this._refreshQueue();
-            this._legacyCount.set(0);
-        }));
-        return this._syncORM();
-    }
-
     // -------------------------------------------------------------------------
     // Many2X Offline
     // -------------------------------------------------------------------------
@@ -635,12 +607,6 @@ export class OfflinePlugin extends Plugin {
         const next = this._writes.then(() => this._queue.lock(callback));
         this._writes = next.catch(() => this._reportStorageError());
         return this._writes;
-    }
-
-    _readLegacyCount() {
-        return withLegacyQueue((rows) => {
-            this._legacyCount.set(rows.filter(({ claim }) => !claim || claim.owner === this._queue.name).length);
-        });
     }
 
     async _storeState(entry, state, error = null) {

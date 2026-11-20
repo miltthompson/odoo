@@ -25,9 +25,7 @@
             <t t-set-slot="content">
                 <div class="o_offline_systray_content px-2">
                     <section t-if="this.offlinePlugin.getLegacyPendingCount()" class="p-2">
-                        <p>Changes from before the update. Confirm they are yours before sending them.</p>
-                        <button class="btn btn-primary me-2" data-available-offline="" t-on-click="() => this.resolveLegacyChanges(true)">Send my changes</button>
-                        <button class="btn btn-secondary" data-available-offline="" t-on-click="() => this.resolveLegacyChanges(false)">Discard</button>
+                        <p t-out="this.legacyNotice"/>
                     </section>
                     <p t-if="this.offlinePlugin.getQueueError()" role="alert" class="text-danger" t-out="this.offlinePlugin.getQueueError()"/>
                     <t t-foreach="this.groupEntries()" t-as="entry" t-key="entry[0]">
