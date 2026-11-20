@@ -81,7 +81,7 @@ export class HtmlViewer extends Component {
 
         if (this.props.config.cssAssetId) {
             onWillStart(async () => {
-                this.cssAsset = await getBundle(this.props.config.cssAssetId);
+                this.cssAsset = await getBundle(this.props.config.cssAssetId, { js: false });
             });
         }
 

@@ -65,14 +65,17 @@ function onLoadAndError(el, onLoad, onError) {
 
 whenReady(computeAssetCaches);
 
+function canCacheBundlesOffline() {
+    return (
+        session.db &&
+        window.navigator.serviceWorker &&
+        /^(?:\/odoo(?:\/|$)|\/scoped_app\/)/.test(location.pathname)
+    );
+}
+
 function getOfflineBundleCache() {
     const { serviceWorker } = window.navigator;
-    if (
-        session.db &&
-        serviceWorker &&
-        !serviceWorker.controller &&
-        /^(?:\/odoo(?:\/|$)|\/scoped_app\/)/.test(location.pathname)
-    ) {
+    if (canCacheBundlesOffline() && !serviceWorker.controller) {
         // Fetches that started before registration were not seen by the worker.
         return (data) => {
             serviceWorker.ready
@@ -125,11 +128,17 @@ export const assets = {
      * Get the files information as descriptor object from a public asset template.
      *
      * @param {string} bundleName Name of the bundle containing the list of files
+     * @param {{ css?: boolean; js?: boolean }} [options]
      * @returns {Promise<BundleFileNames>}
      */
-    getBundle(bundleName) {
-        if (assets.globalCache.has(bundleName)) {
-            return assets.globalCache.get(bundleName);
+    getBundle(bundleName, { css = true, js = true } = {}) {
+        if (!css && !js) {
+            return Promise.resolve({ cssLibs: [], jsLibs: [] });
+        }
+        const assetType = css === js ? "" : css ? "css" : "js";
+        const cacheKey = assetType ? `${bundleName}:${assetType}` : bundleName;
+        if (assets.globalCache.has(cacheKey)) {
+            return assets.globalCache.get(cacheKey);
         }
         const url = new URL(`/web/bundle/${bundleName}`, location.origin);
         for (const [key, value] of Object.entries(session.bundle_params || {})) {
@@ -138,6 +147,9 @@ export const assets = {
         if (session.db && session.registry_hash) {
             // Keep offline bundle descriptors tied to the database and registry that loaded them.
             url.searchParams.set("registry_hash", session.registry_hash);
+            if (assetType && canCacheBundlesOffline()) {
+                url.searchParams.set("offline_asset_type", assetType);
+            }
         }
         const cacheOfflineBundle = getOfflineBundleCache();
         const promise = fetch(url)
@@ -150,9 +162,9 @@ export const assets = {
                         cacheOfflineBundle?.({ url: url.href, descriptor: result });
                     }
                     for (const { src, type } of Object.values(result)) {
-                        if (type === "link" && src) {
+                        if (css && type === "link" && src) {
                             cssLibs.push(src);
-                        } else if (type === "script" && src) {
+                        } else if (js && type === "script" && src) {
                             jsLibs.push(src);
                         }
                     }
@@ -160,10 +172,10 @@ export const assets = {
                 return { cssLibs, jsLibs };
             })
             .catch((reason) => {
-                assets.globalCache.delete(bundleName);
+                assets.globalCache.delete(cacheKey);
                 throw new AssetsLoadingError(`The loading of ${url} failed`, { cause: reason });
             });
-        assets.globalCache.set(bundleName, promise);
+        assets.globalCache.set(cacheKey, promise);
         return promise;
     },
 
@@ -187,7 +199,7 @@ export const assets = {
             );
         }
         const cacheOfflineBundle = getOfflineBundleCache();
-        return getBundle(bundleName).then(({ cssLibs, jsLibs }) => {
+        return getBundle(bundleName, options).then(({ cssLibs, jsLibs }) => {
             const promises = [];
             if (options?.css ?? true) {
                 for (const url of cssLibs) {

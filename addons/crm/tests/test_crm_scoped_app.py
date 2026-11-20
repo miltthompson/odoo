@@ -46,7 +46,7 @@ class TestCrmScopedApp(HttpCase):
                 } else if (serviceWorker.controller) {
                     throw new Error('Expected the first main webclient visit to be uncontrolled');
                 }
-                const { loadBundle, getBundle, loadCSS } = odoo.loader.modules.get('@web/core/assets');
+                const { loadBundle, getBundle } = odoo.loader.modules.get('@web/core/assets');
                 const bundle = 'web.assets_backend_lazy';
                 const { bundle_params, registry_hash } = odoo.loader.modules.get('@web/session').session;
                 const descriptorURL = new URL(`/web/bundle/${bundle}`, location.origin);
@@ -54,12 +54,22 @@ class TestCrmScopedApp(HttpCase):
                 const cache = await caches.open('odoo-sw-bundles');
                 const latestDescriptors = await caches.open('odoo-sw-bundle-descriptors');
                 const oldScript = '/web/assets/abcdef0/web.assets_backend_lazy.min.js';
+                const oldStylesheet = '/web/assets/abcdef0/web.assets_backend_lazy.min.css';
+                const cssDescriptorURL = new URL(descriptorURL);
+                cssDescriptorURL.searchParams.set('offline_asset_type', 'css');
                 if (!scoped) {
                     // An asset edit can leave a working older bundle at the same descriptor URL.
                     await cache.put(oldScript, new Response('// old bundle', {
                         headers: { 'Content-Type': 'text/javascript' },
                     }));
+                    await cache.put(oldStylesheet, new Response('/* old bundle */', {
+                        headers: { 'Content-Type': 'text/css' },
+                    }));
                     await latestDescriptors.put(descriptorURL, Response.json([{ type: 'script', src: oldScript }]));
+                    await latestDescriptors.put(cssDescriptorURL, Response.json([
+                        { type: 'link', src: oldStylesheet },
+                        { type: 'script', src: '/web/assets/eeeeeee/unloaded.min.js' },
+                    ]));
                 }
                 const { jsLibs, cssLibs } = await getBundle(bundle);
                 const lazyScript = jsLibs.find((url) => url.startsWith('/web/assets/'));
@@ -83,11 +93,18 @@ class TestCrmScopedApp(HttpCase):
                     return files.includes(lazyScript) && files.includes(lazyStylesheet);
                 });
                 if (!scoped) {
-                    // The new descriptor survives on disk even if only its CSS has arrived.
-                    await loadCSS(lazyStylesheet);
-                    const { active } = await serviceWorker.ready;
-                    active.postMessage({ type: 'cache_bundle', bundles: [lazyStylesheet] });
-                    await waitForCacheEntry(cache, lazyStylesheet);
+                    // A CSS-only load caches a separate descriptor even though JS hasn't arrived.
+                    await loadBundle(bundle, { js: false });
+                    await Promise.all([
+                        waitForCacheEntry(cache, lazyStylesheet),
+                        waitForCacheEntry(latestDescriptors, cssDescriptorURL, async (entry) =>
+                            (await entry.json()).some(({ src }) => src === lazyStylesheet)
+                        ),
+                    ]);
+                    const [previousCss] = await (await cache.match(cssDescriptorURL)).json();
+                    if (previousCss.src !== oldStylesheet) {
+                        throw new Error('An unloaded script prevented retaining the previous CSS descriptor');
+                    }
                     if (await cache.match(lazyScript)) {
                         throw new Error('The test must leave the replacement JS unloaded');
                     }

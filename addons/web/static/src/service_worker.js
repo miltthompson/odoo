@@ -128,11 +128,19 @@ const isBundleDescriptor = (url) =>
     url.searchParams.has("registry_hash") &&
     !usesDebugAssets(url);
 
-const hasBundleFiles = async (cache, descriptor) => {
+const hasBundleFiles = async (cache, request, descriptor) => {
+    const requestURL = new URL(request.url || request, self.location.origin);
+    const assetType = requestURL.searchParams.get("offline_asset_type");
     const files = descriptor
         .filter(({ src }) => src)
         .map(({ src }) => new URL(src, self.location.origin))
-        .filter(isBundleFile);
+        .filter(isBundleFile)
+        .filter((url) => {
+            if (assetType === "css" || assetType === "js") {
+                return url.pathname.endsWith(`.min.${assetType}`);
+            }
+            return true;
+        });
     return (await Promise.all(files.map((file) => cache.match(file.href)))).every(Boolean);
 };
 
@@ -150,7 +158,7 @@ const saveBundleDescriptor = async (cache, request, response) => {
         }
         // Keep the last complete bundle before recording a replacement. Check at
         // descriptor reads/writes, not at every asset load or in worker memory.
-        if (await hasBundleFiles(cache, previousDescriptor)) {
+        if (await hasBundleFiles(cache, request, previousDescriptor)) {
             await cache.put(request, Response.json(previousDescriptor));
         }
     }
@@ -181,9 +189,9 @@ const readCachedBundle = async (request, descriptor) => {
     }
     const latestCache = await caches.open(bundleDescriptorCacheName);
     const latest = await latestCache.match(request);
-    // With no complete version, a partial descriptor can still serve a caller
-    // that needs only CSS (or only JS). Never mix assets from different versions.
-    if (latest && (!cached || (await hasBundleFiles(cache, await latest.clone().json())))) {
+    // Prefer the latest descriptor only when all requested files are cached,
+    // or when there is no earlier usable descriptor for this request.
+    if (latest && (!cached || (await hasBundleFiles(cache, request, await latest.clone().json())))) {
         return latest;
     }
     return cached;
