@@ -336,21 +336,33 @@ test("prefetched view layouts are served from the normal cache while offline", a
     await expect.waitForSteps([]);
 });
 
-test("CRM dependent-app action and object buttons are unavailable offline", async () => {
+test("CRM dependent-app header actions explain why they are unavailable offline", async () => {
     const setOffline = mockOffline();
     await mountView({
         type: "form",
         resModel: "crm.lead",
         resId: 1,
-        arch: `<form><sheet>
-            <button name="action_sale_quotations_new" string="New Quotation" type="object"/>
-            <button name="2" string="SMS" type="action"/>
-            <field name="name"/>
-        </sheet></form>`,
+        arch: `<form>
+            <header>
+                <button name="action_set_won_rainbowman" string="Won" type="object"/>
+                <button name="action_sale_quotations_new" string="New Quotation" type="object"/>
+                <button name="2" string="SMS" type="action"/>
+            </header>
+            <sheet><field name="name"/></sheet>
+        </form>`,
     });
-    expect("button[name='action_sale_quotations_new']").not.toHaveAttribute("aria-disabled");
-    expect("button[name='2']").not.toHaveAttribute("aria-disabled");
     await setOffline(true);
-    expect("button[name='action_sale_quotations_new']").toHaveAttribute("aria-disabled", "true");
+    const quotation = "button[name='action_sale_quotations_new']";
+    if (getService("ui").isSmall) {
+        expect(quotation).toHaveCount(0);
+        const more = ".o_statusbar_buttons button.dropdown-toggle-split";
+        expect(more).toBeEnabled();
+        await contains(more).click();
+        expect(`.o-dropdown--menu ${quotation}`).toHaveText("New Quotation");
+    } else {
+        expect(`.o_statusbar_buttons ${quotation}`).toHaveText("New Quotation");
+    }
+    expect(quotation).toHaveAttribute("aria-disabled", "true");
+    expect(quotation).toHaveAttribute("data-tooltip", "This action needs a connection.");
     expect("button[name='2']").toHaveAttribute("aria-disabled", "true");
 });
