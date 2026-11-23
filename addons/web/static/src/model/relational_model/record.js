@@ -440,6 +440,12 @@ export class Record extends DataPoint {
             for (const fieldName of invalidFields) {
                 this.setInvalidField(fieldName);
             }
+            // An edit can add a field that wasn't loaded by the view.
+            for (const fieldName of Object.keys(this.data)) {
+                if (!Object.hasOwn(initialData, fieldName)) {
+                    delete this.data[fieldName];
+                }
+            }
             Object.assign(this.data, initialData);
             this._changes = markRaw(initialChanges);
             Object.assign(this._textValues, initialTextValues);
