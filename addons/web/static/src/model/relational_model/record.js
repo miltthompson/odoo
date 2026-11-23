@@ -1417,6 +1417,10 @@ export class Record extends DataPoint {
                 kwargs: { context: this.context, specification: {} },
                 options: {
                     id: this._offlineId,
+                    // The draft may have been discarded while its form was still open.
+                    draftCreateValues: this.isNew && this._offlineId
+                        ? this._getChanges(this._changes, { isNew: true })
+                        : undefined,
                     extras: {
                         ...getScheduleORMExtras(this.model, [this]),
                         changes: this._formatOfflineValues(offlineChanges),

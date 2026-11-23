@@ -2,6 +2,7 @@ import { expect, test } from "@odoo/hoot";
 import { makeErrorFromResponse } from "@web/core/network/rpc";
 import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { OfflineQueueStore } from "@web/core/offline/offline_storage";
+import { DynamicList } from "@web/model/relational_model/dynamic_list";
 import {
     contains, defineModels, fields, getService, makeTestApp, mockOffline, models, mountView,
     onRpc, patchWithCleanup,
@@ -104,6 +105,55 @@ test("failed draft saves do not leave a create behind and follow-up saves only s
     expect(edit.args).toEqual([[`offline:${create.key}`], { name: "Updated draft" }]);
 });
 
+test("saving an open draft after discarding its create keeps all form values", async () => {
+    class Lead extends models.Model {
+        name = fields.Char();
+        email = fields.Char();
+    }
+    defineModels([Lead]);
+    const setOffline = mockOffline();
+    await mountView({
+        type: "form", resModel: "lead",
+        arch: `<form><field name="name"/><field name="email"/></form>`,
+    });
+    const offline = getService(OfflinePlugin);
+    await setOffline(true);
+    await contains(".o_field_widget[name='name'] input").edit("Draft");
+    await contains(".o_field_widget[name='email'] input").edit("contact@example.com");
+    await contains(".o_form_button_save").click();
+    const [discarded] = offline.getPendingEntries();
+    await offline.discardPendingChange(discarded.key);
+    await contains(".o_field_widget[name='name'] input").edit("New draft");
+    await contains(".o_form_button_save").click();
+    const [create] = await offline._queue.list();
+    expect(create.key).not.toBe(discarded.key);
+    expect(create.args).toEqual([[], { name: "New draft", email: "contact@example.com" }]);
+});
+
+test("queue rejection propagates to callers scheduling dependent changes", async () => {
+    await makeTestApp();
+    const offline = getService(OfflinePlugin);
+    const [first, second, third] = Array.from({ length: 3 }, () => crypto.randomUUID());
+    patchWithCleanup(offline._queue, {
+        async add(entry) {
+            if (entry.key === first) {
+                throw new Error("Storage is full");
+            }
+            return super.add(entry);
+        },
+    });
+    offline.scheduleORM("res.partner", "create", [{ name: "First" }], {}, { key: first });
+    offline.scheduleORM("res.partner", "create", [{ parent_id: `offline:${first}` }], {}, {
+        key: second, refs: [first],
+    });
+    offline.scheduleORM("res.partner", "write", [[`offline:${second}`], { name: "Third" }], {}, {
+        key: third, refs: [second],
+    });
+    expect(await offline.waitForPendingWrite(third)).toBe(false);
+    expect(offline.getPendingEntries().map(({ key }) => key)).toEqual([first]);
+    expect(await offline._queue.list()).toEqual([]);
+});
+
 test("ordered changes to the same draft remain blocked after its create succeeds", async () => {
     const sent = [];
     onRpc("/web/offline/sync", async (request) => {
@@ -150,6 +200,43 @@ test("a bulk edit does not publish any entries if its durable batch fails", asyn
     fail = false;
     expect(await offline.scheduleORMBatch(calls)).toHaveLength(2);
     expect((await offline._queue.list()).map((entry) => entry.args[0])).toEqual([[1], [2]]);
+});
+
+test("a failed bulk offline save restores the original values in the view", async () => {
+    class Lead extends models.Model {
+        name = fields.Char();
+        stage = fields.Char();
+        _records = [
+            { id: 1, name: "One", stage: "New" },
+            { id: 2, name: "Two", stage: "New" },
+        ];
+    }
+    defineModels([Lead]);
+    let list;
+    patchWithCleanup(DynamicList.prototype, {
+        setup() {
+            super.setup();
+            list = this;
+        },
+    });
+    const setOffline = mockOffline();
+    await mountView({
+        type: "list", resModel: "lead",
+        arch: `<list><field name="name"/><field name="stage"/></list>`,
+    });
+    const offline = getService(OfflinePlugin);
+    patchWithCleanup(offline._queue, {
+        async addMany(entries) {
+            expect(entries.map(({ args }) => args)).toEqual([
+                [[1], { stage: "Won" }], [[2], { stage: "Won" }],
+            ]);
+            throw new Error("Storage is full");
+        },
+    });
+    await setOffline(true);
+    expect(await list._saveRecords(list.records, { stage: "Won" })).toBe(false);
+    expect(list.records.map(({ data }) => data.stage)).toEqual(["New", "New"]);
+    expect(offline.getPendingEntries()).toEqual([]);
 });
 
 test("a rejected mock dataset call stays queued through the mock replay endpoint", async () => {
