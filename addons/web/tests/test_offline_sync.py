@@ -9,6 +9,7 @@ from odoo import SUPERUSER_ID, api, fields
 from odoo.exceptions import AccessError
 from odoo.http.retrying import retrying
 from odoo.modules.registry import Registry
+from odoo.service.model import call_kw
 from odoo.tests import HttpCase, new_test_user, tagged
 from odoo.tests.common import BaseCase, get_db_name
 from odoo.tools import SQL, mute_logger
@@ -132,6 +133,39 @@ class TestOfflineSync(HttpCase):
         self.assertFalse(self.env['res.partner'].search([('name', '=', 'Must roll back')]))
         self.assertFalse(self.env['web.offline.operation'].search([('key', '=', key)]))
         self.assertTrue(self._send(key, steps=steps[:1])['result'])
+
+    @mute_logger('odoo.http')
+    def test_replay_rejects_transaction_control_and_can_be_retried(self):
+        self.authenticate(self.alice.login, self.alice.login)
+        for cursor_method in ('commit', 'rollback'):
+            with self.subTest(cursor_method=cursor_method):
+                key = str(uuid4())
+                name = f'Offline contact before {cursor_method}'
+                partner_domain = [('name', '=', name)]
+                operation_domain = [('user_id', '=', self.alice.id), ('key', '=', key)]
+                steps = [
+                    {'model': 'res.partner', 'method': 'create', 'args': [{'name': name}], 'kwargs': {}},
+                    {'model': 'res.partner', 'method': 'write', 'args': [['step:0'], {'phone': '555'}], 'kwargs': {}, 'refs': [0]},
+                ]
+
+                def dispatch(model, method, args, kwargs):
+                    if method == 'write':
+                        getattr(model.env.cr, cursor_method)()
+                    return call_kw(model, method, args, kwargs)
+
+                with patch('odoo.addons.web.models.web_offline_operation.call_kw', side_effect=dispatch):
+                    error = self._send(key, steps=steps)['error']['data']
+                self.assertEqual(error['name'], 'builtins.AssertionError')
+                self.assertIn(f'cannot {cursor_method}', error['message'])
+                self.assertFalse(self.env['res.partner'].search(partner_domain))
+                self.assertFalse(self.env['web.offline.operation'].search(operation_domain))
+
+                results = self._send(key, steps=steps)['result']
+                self.assertEqual(results, self._send(key, steps=steps)['result'])
+                partner = self.env['res.partner'].search(partner_domain)
+                self.assertEqual(partner.ids, [results[0]])
+                self.assertEqual(partner.phone, '555')
+                self.assertEqual(self.env['web.offline.operation'].search_count(operation_domain), 1)
 
     @mute_logger('odoo.http')
     def test_regular_rpc_access_checks(self):
