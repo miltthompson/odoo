@@ -5,7 +5,7 @@ import json
 from psycopg2.errors import UniqueViolation
 
 from odoo import api, fields, models
-from odoo.exceptions import ConcurrencyError, MissingError
+from odoo.exceptions import ConcurrencyError, MissingError, RedirectWarning, UserError
 from odoo.service.model import call_kw
 from odoo.tools.json import json_default
 
@@ -45,7 +45,7 @@ class WebOfflineOperation(models.Model):
     _create_date_index = models.Index('(create_date) WHERE result IS NOT NULL')
 
     @api.model
-    def _apply(self, key, model=None, method=None, args=None, kwargs=None, refs=None, *, steps=None):
+    def _apply(self, key, model=None, method=None, args=None, kwargs=None, refs=None, *, steps=None, on_rollback=None):
         uid = self.env.uid
         # Regular users cannot access the log. Only log access is elevated;
         # the business call below uses the same environment as dataset/call_kw.
@@ -70,15 +70,23 @@ class WebOfflineOperation(models.Model):
         calls = steps if steps is not None else [{'model': model, 'method': method, 'args': args, 'kwargs': kwargs, 'refs': refs or []}]
         # A flushing savepoint prevents replayed methods from committing or
         # rolling back the request cursor before the result has been recorded.
-        with self.env.cr.savepoint():
-            results, created_by_step = self._replay_calls(calls, Log, uid)
-            response = results if steps is not None else results[0]
-            # Normalize dates and other values the same way as the JSON-RPC transport.
-            response = json.loads(json.dumps(response, default=json_default))
-            operation.write({
-                'result': {'response': response},
-                'created_ids': [record_id for ids in created_by_step for record_id in ids],
-            })
+        with self.env.cr.savepoint() as savepoint:
+            try:
+                results, created_by_step = self._replay_calls(calls, Log, uid)
+                response = results if steps is not None else results[0]
+                # Normalize dates and other values the same way as the JSON-RPC transport.
+                response = json.loads(json.dumps(response, default=json_default))
+                operation.write({
+                    'result': {'response': response},
+                    'created_ids': [record_id for ids in created_by_step for record_id in ids],
+                })
+                self.env.cr.flush()
+            except (UserError, RedirectWarning) as error:
+                if on_rollback is not None:
+                    # close() rolls back by default. If rollback fails, don't mark the error.
+                    savepoint.close()
+                    on_rollback(error)
+                raise
         return response
 
     def _replay_calls(self, calls, Log, uid):

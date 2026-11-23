@@ -70,7 +70,7 @@
                                     <button t-if="element.clickable" type="button" class="btn btn-link p-0 me-2" data-available-offline="" t-on-click.stop="() => this.openView(element.entry, true)">Open</button>
                                     <button t-if="element.retryKey" type="button" class="btn btn-link p-0" data-available-offline="" t-att-disabled="this.offlinePlugin.syncingORM()" t-on-click.stop="() => this.offlinePlugin.retryPendingChange(element.retryKey)">Retry</button>
                                 </span>
-                                <div>
+                                <div t-if="element.discardable">
                                     <button
                                         class="oi oi-filled btn btn-link text-danger py-0" data-icon="delete"
                                         title="Discard offline changes"

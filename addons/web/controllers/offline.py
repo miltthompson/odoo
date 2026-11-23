@@ -5,6 +5,7 @@ from uuid import UUID
 from odoo import http
 from odoo.exceptions import ValidationError
 from odoo.http import request
+from odoo.http.dispatcher import serialize_exception
 from odoo.http.session import SessionExpiredException
 
 
@@ -53,10 +54,20 @@ class Offline(http.Controller):
             call = {'model': model, 'method': method, 'args': args, 'kwargs': kwargs, 'refs': [] if refs is None else refs}
             if not _is_call(call):
                 raise ValidationError(env._("Invalid offline change."))
-            return Operation._apply(key, **call)
+            return Operation._apply(key, on_rollback=self._mark_rolled_back, **call)
         if (any(value is not None for value in (model, method, args, kwargs, refs))
             or not isinstance(steps, list) or not steps
             or not all(_is_call(step, index) for index, step in enumerate(steps))
         ):
             raise ValidationError(env._("Invalid offline change."))
-        return Operation._apply(key, steps=steps)
+        return Operation._apply(key, steps=steps, on_rollback=self._mark_rolled_back)
+
+    @staticmethod
+    def _mark_rolled_back(error):
+        # Keep the normal JSON-RPC error and let Odoo abort the request. Attach
+        # confirmation only to this exception, not to a later request failure.
+        error.error_response = request.dispatcher._response(error={
+            'code': 0,
+            'message': 'Odoo Server Error',
+            'data': {**serialize_exception(error), 'offline_replay_rolled_back': True},
+        })

@@ -194,6 +194,7 @@ class OfflineSystray extends Component {
                 displayName: extras.displayName || entry.label || recordName,
                 description: describeChange(entry, recordName),
                 clickable: this.isClickable(entry),
+                discardable: this.offlinePlugin.canDiscardPendingChange(entry),
                 retryKey: entry.state === "needs_attention" && !entry.manualRecovery && entry.key,
                 error: entry.error,
                 reason: typeof entry.error === "string" ? entry.error : "",
