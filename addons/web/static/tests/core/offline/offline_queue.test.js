@@ -315,6 +315,7 @@ test("saving an open, explicitly discarded old draft sends only the current valu
     class Lead extends models.Model {
         name = fields.Char();
         email = fields.Char();
+        _records = [{ id: 47, name: "Latest values", email: "same@example.com" }];
     }
     defineModels([Lead]);
     let record;
