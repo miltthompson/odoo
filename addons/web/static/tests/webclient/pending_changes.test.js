@@ -223,6 +223,71 @@ test("manual recovery identifies a sorted draft line by its original values, not
     expect(line).toMatch(/^line_ids: Edit draft line \(original values: name: Same, quantity: 8\): (name: Same, )?quantity: 9$/);
 });
 
+for (const sortBackToId of [true, false]) {
+    test(sortBackToId
+        ? "switching draft lines back to ID sort does not use a stale row number"
+        : "a sorted draft line with matching values includes its visible reference", async () => {
+        class Draft extends models.Model {
+            name = fields.Char();
+            line_ids = fields.One2many({ relation: "line", relation_field: "draft_id" });
+            _views = { "form,false": `<form><field name="name"/><field name="line_ids">
+                <list editable="bottom" default_order="id"><field name="name"/><field name="quantity"/>
+                    <field name="hidden_code" column_invisible="True"/><field name="reference"/>
+                </list>
+            </field></form>` };
+        }
+        class Line extends models.Model {
+            name = fields.Char();
+            quantity = fields.Integer();
+            hidden_code = fields.Char();
+            reference = fields.Char();
+            draft_id = fields.Many2one({ relation: "draft" });
+        }
+        defineModels([Draft, Line, ...Object.values(webModels)]);
+        defineActions([{ id: 5, res_model: "draft", views: [[false, "form"]] }]);
+        let record;
+        patchWithCleanup(Record.prototype, {
+            setup(config) {
+                super.setup(...arguments);
+                if (config.isRoot && this.resModel === "draft") {
+                    record = this;
+                }
+            },
+        });
+        onRpc("/web/offline/sync", () => [{ id: 47 }]);
+        await mountWithCleanup(WebClient);
+        await getService("action").doAction(5);
+        await waitFor(".o_form_view");
+        const offline = getService(OfflinePlugin);
+        const changes = {
+            name: "Draft",
+            line_ids: [
+                [0, 0, { name: "Same", quantity: sortBackToId ? 1 : 8, hidden_code: "Hidden A", reference: "Ref A" }],
+                [0, 0, { name: "Same", quantity: 8, hidden_code: "Hidden B", reference: "Ref B" }],
+            ],
+        };
+        const id = await offline.scheduleORMDurably("draft", "web_save", [[], changes], {}, { extras: { changes } });
+        await record.setOfflineChanges(id);
+        await offline.syncPendingChanges();
+        const lines = record.data.line_ids;
+        await lines.sortBy("quantity");
+        if (sortBackToId) {
+            await lines.sortBy("quantity");
+            await lines.sortBy("quantity");
+            expect(lines.orderBy).toEqual([{ name: "id", asc: true }]);
+        }
+        const line = lines.records[sortBackToId ? 0 : 1];
+        expect(line.data.reference).toBe("Ref B");
+        await line.update({ quantity: 9 });
+        expect(await record.save()).toBe(true);
+        await contains(".o_offline_systray").click();
+        const recovery = queryAllTexts(".o_offline_recovery_values li").find((text) => text.startsWith("line_ids:"));
+        const original = sortBackToId ? "name: Same, quantity: 8" : "name: Same, quantity: 8, reference: Ref B";
+        expect(recovery.split("): ")[0]).toBe(`line_ids: Edit draft line (original values: ${original}`);
+        expect(recovery).toMatch(/quantity: 9/);
+    });
+}
+
 test("Open shows the values of the selected save when two saves share a legacy key", async () => {
     class PendingContact extends models.Model {
         _name = "pending.contact";
