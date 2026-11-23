@@ -127,6 +127,15 @@ export class OfflineQueueStore {
         await this.db.write(ENTRIES, values);
     }
 
+    recordDraftDiscard(key) {
+        // Keep just the UUID marker: another tab may keep the draft open past receipt expiry.
+        return this.db.write(QUEUE_META, `discarded:${key}`, true);
+    }
+
+    wasDraftDiscarded(key) {
+        return this.db.read(QUEUE_META, `discarded:${key}`);
+    }
+
     async recordResolution(model, localId, key, id) {
         const current = await this.keys.current();
         const index = JSON.stringify([model, localId]);

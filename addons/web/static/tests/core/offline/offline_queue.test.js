@@ -311,6 +311,48 @@ test("an expired draft receipt resends the original create and uses the acknowle
     expect(await offline._queue.list()).toEqual([]);
 });
 
+test("saving an open, explicitly discarded old draft sends only the current values with a fresh key", async () => {
+    class Lead extends models.Model {
+        name = fields.Char();
+        email = fields.Char();
+    }
+    defineModels([Lead]);
+    let record;
+    patchWithCleanup(Record.prototype, {
+        setup(config) {
+            super.setup(...arguments);
+            if (config.isRoot) {
+                record = this;
+            }
+        },
+    });
+    const setOffline = mockOffline();
+    const sent = [];
+    onRpc("/web/offline/sync", async (request) => {
+        sent.push((await request.json()).params);
+        return [{ id: 47 }];
+    });
+    mockDate("2026-01-01T12:00:00");
+    await mountView({ type: "form", resModel: "lead", arch: '<form><field name="name"/><field name="email"/></form>' });
+    const offline = getService(OfflinePlugin);
+    await setOffline(true);
+    const values = { name: "Old draft", email: "same@example.com" };
+    const id = await offline.scheduleORMDurably("lead", "web_save", [[], values], {}, { extras: { changes: values } });
+    const [original] = await offline._queue.list();
+    await record.setOfflineChanges(id);
+    mockDate("2026-02-02T12:00:00");
+    await offline.discardPendingChange(original.key);
+    await contains("[name='name'] input").edit("Latest values");
+    await contains(".o_form_button_save").click();
+    const [replacement] = await offline._queue.list();
+    await setOffline(false);
+    await offline.syncPendingChanges();
+    expect(sent.map(({ key, args }) => [key, args])).toEqual([
+        [replacement.key, [[], { name: "Latest values", email: "same@example.com" }]],
+    ]);
+    expect(replacement.key).not.toBe(original.key);
+});
+
 test("a draft whose original key is lost is kept for manual recovery", async () => {
     class Lead extends models.Model {
         name = fields.Char();
@@ -443,6 +485,47 @@ test("reopening a rejected draft follow-up keeps later saves in replay order", a
     expect(rejected.state).toBe("needs_attention");
     expect(later.args).toEqual([[47], { name: "Later edit" }]);
     expect(later.state).toBe("held_back");
+    expect.verifySteps([]);
+});
+
+test("reopening an edit queued with the server ID still keeps subsequent saves in replay order", async () => {
+    class Lead extends models.Model {
+        name = fields.Char();
+        _records = [{ id: 47, name: "Synced draft" }];
+    }
+    defineModels([Lead]);
+    let record;
+    patchWithCleanup(Record.prototype, {
+        setup(config) {
+            super.setup(...arguments);
+            if (config.isRoot) {
+                record = this;
+            }
+        },
+    });
+    onRpc("web_save", () => expect.step("unexpected direct write"));
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        return params.refs.length ? rejection(0, "odoo.exceptions.AccessError") : [{ id: 47 }];
+    });
+    await mountView({ type: "form", resModel: "lead", resId: 47, arch: '<form><field name="name"/></form>' });
+    const offline = getService(OfflinePlugin);
+    const id = offline.scheduleORM("lead", "web_save", [[], { name: "Draft" }], {});
+    const edit = { name: "Rejected edit" };
+    offline.scheduleORM("lead", "web_save", [[], edit], {}, { id, extras: { changes: edit } });
+    await offline._syncORM();
+    const laterEdit = { name: "Later edit" };
+    const laterId = await offline.scheduleORMDurably("lead", "web_save", [[47], laterEdit], {}, {
+        id, extras: { changes: laterEdit },
+    });
+    await offline.syncPendingChanges();
+    await record.setOfflineChanges(laterId);
+    await contains("[name='name'] input").edit("Latest edit");
+    await contains(".o_form_button_save").click();
+    await offline.syncPendingChanges();
+    const queued = await offline._queue.list();
+    expect(queued.map(({ state }) => state)).toEqual(["needs_attention", "held_back", "held_back"]);
+    expect(queued.at(-1).args).toEqual([[47], { name: "Latest edit" }]);
     expect.verifySteps([]);
 });
 

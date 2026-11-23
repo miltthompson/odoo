@@ -485,6 +485,9 @@ export class OfflinePlugin extends Plugin {
         await this._enqueueWrite(async () => {
             const entry = await this._queue.get(key);
             if (entry?.state !== "sending") {
+                if (entry?.draftSent === false) {
+                    await this._queue.recordDraftDiscard(key);
+                }
                 await this._queue.remove(key);
                 this._removeEntry(key);
             }
@@ -674,7 +677,8 @@ export class OfflinePlugin extends Plugin {
             (resId && entry.target.ids.includes(resId)));
         // A missing create can mean its local receipt expired instead of being discarded.
         const recover = Boolean(key && !resId && !pending &&
-            !(Date.now() - (queued_at ?? acted_at) < RESOLUTION_TTL));
+            !(Date.now() - (queued_at ?? acted_at) < RESOLUTION_TTL) &&
+            !await this._queue.wasDraftDiscarded(key));
         return { resId, pending, recover };
     }
 
@@ -728,6 +732,7 @@ export class OfflinePlugin extends Plugin {
             server_version: session.registry_hash,
             state: options.manualRecovery || extras?.error ? "needs_attention" : "waiting",
             error: options.manualRecovery || extras?.error || null,
+            ...(method === "web_save" && !create && !args[0]?.length && { draftSent: false }),
             ...(options.manualRecovery && { manualRecovery: true }),
         };
     }
@@ -779,8 +784,13 @@ export class OfflinePlugin extends Plugin {
 
     async _storeState(entry, state, error = null) {
         const updated = { ...entry, state, error };
+        if (state === "sending" && entry.draftSent === false) {
+            // A lost response can mean the server applied this create. Keep its key recoverable.
+            updated.draftSent = true;
+        }
         await this._queue.write(updated);
         this._replaceEntry(updated);
+        return updated;
     }
 
     _reason(error) {
@@ -838,8 +848,7 @@ export class OfflinePlugin extends Plugin {
                             await this._storeState(current, "held_back", _t("Waiting for an earlier change on this record."));
                             return;
                         }
-                        await this._storeState(current, "sending");
-                        return current;
+                        return this._storeState(current, "sending");
                     });
                     if (!entry) {
                         continue;
