@@ -13,7 +13,7 @@ import { DebugModePlugin } from "@web/core/debug_mode_plugin";
 import { NonSecureContextError } from "@web/core/errors/non_secure_context_error";
 import { _t } from "@web/core/l10n/translation";
 import { normalize } from "@web/core/l10n/utils";
-import { ConnectionLostError, rpc, rpcBus } from "@web/core/network/rpc";
+import { ConnectionLostError, RPCError, rpc, rpcBus } from "@web/core/network/rpc";
 import { OfflineQueueStore, RESOLUTION_TTL, clearLegacyReadStores, offlineDatabaseName } from "./offline_storage";
 import { isOfflineRecordId, offlineRecordRef } from "./offline_id";
 import { user } from "@web/core/user";
@@ -485,7 +485,7 @@ export class OfflinePlugin extends Plugin {
         await this._enqueueWrite(async () => {
             const entry = await this._queue.get(key);
             if (entry?.state !== "sending") {
-                if (entry?.draftSent === false) {
+                if (entry?.draftSent === false || entry?.draftRejected) {
                     await this._queue.recordDraftDiscard(key);
                 }
                 await this._queue.remove(key);
@@ -782,11 +782,12 @@ export class OfflinePlugin extends Plugin {
         return this._writes;
     }
 
-    async _storeState(entry, state, error = null) {
-        const updated = { ...entry, state, error };
-        if (state === "sending" && entry.draftSent === false) {
+    async _storeState(entry, state, error = null, patch) {
+        const updated = { ...entry, state, error, ...patch };
+        if (state === "sending" && (entry.draftSent === false || entry.draftRejected)) {
             // A lost response can mean the server applied this create. Keep its key recoverable.
             updated.draftSent = true;
+            delete updated.draftRejected;
         }
         await this._queue.write(updated);
         this._replaceEntry(updated);
@@ -876,7 +877,15 @@ export class OfflinePlugin extends Plugin {
                             break;
                         }
                         blockers.push(entry);
-                        await this._queue.lock(() => this._storeState(entry, "needs_attention", this._reason(error)));
+                        // These server errors roll back the draft and its receipt. Transport
+                        // and other uncertain failures must keep using the original key.
+                        const draftRejected = method === "web_save" && !args[0]?.length &&
+                            error instanceof RPCError && [
+                                "odoo.exceptions.MissingError", "odoo.exceptions.AccessError",
+                                "odoo.exceptions.ValidationError", "odoo.exceptions.UserError",
+                            ].includes(error.exceptionName);
+                        await this._queue.lock(() => this._storeState(entry, "needs_attention",
+                            this._reason(error), draftRejected ? { draftRejected } : undefined));
                         continue;
                     }
                     await this._queue.lock(async () => {

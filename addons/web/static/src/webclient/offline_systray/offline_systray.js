@@ -10,6 +10,7 @@ import { _t } from "../../core/l10n/translation";
 import { formatDateTime } from "@web/core/l10n/dates";
 import { ConfirmationDialog } from "@web/core/confirmation_dialog/confirmation_dialog";
 import { rpcBus } from "@web/core/network/rpc";
+import { x2ManyCommands } from "@web/core/orm_plugin";
 
 const { DateTime } = luxon;
 
@@ -28,6 +29,30 @@ const CHANGE_STATES = {
     needs_attention: _t("Needs attention"),
     held_back: _t("Held back"),
 };
+
+function formatPendingValue(value) {
+    return value?.display_name ?? (value && typeof value === "object" ? JSON.stringify(value) : value);
+}
+
+function describeLineChanges(changes) {
+    const { CREATE, UPDATE, DELETE, UNLINK } = x2ManyCommands;
+    return changes.map((command) => {
+        if (!Array.isArray(command)) {
+            return formatPendingValue(command);
+        }
+        const [operation, id, values] = command;
+        if ((operation === CREATE || operation === UPDATE) && values && typeof values === "object") {
+            const fields = Object.entries(values).map(([field, value]) =>
+                _t("%(field)s: %(value)s", { field, value: formatPendingValue(value) })
+            ).join(", ");
+            return operation === CREATE ? _t("Add line: %s", fields) : _t("Edit line: %s", fields);
+        }
+        if (operation === DELETE || operation === UNLINK) {
+            return Number.isSafeInteger(id) && id > 0 ? _t("Remove line %s", id) : _t("Remove line");
+        }
+        return formatPendingValue(command);
+    }).join("; ");
+}
 
 function describeChange(entry, recordName) {
     if (entry.label && entry.label !== entry.extras?.displayName) {
@@ -160,8 +185,13 @@ class OfflineSystray extends Component {
                 item.status = value.args[0].length ? STATUS.EDITED : STATUS.CREATED;
                 item.tooltip.changes = Object.entries(extras.changes || {}).map(([k, v]) => [
                     k,
-                    v?.display_name ?? v,
+                    value.manualRecovery
+                        ? Array.isArray(v) ? describeLineChanges(v) : formatPendingValue(v)
+                        : v?.display_name ?? v,
                 ]);
+                if (value.manualRecovery) {
+                    item.recoveryValues = item.tooltip.changes;
+                }
                 if (value.args[0].length) {
                     item.tooltip.changes = item.tooltip.changes.map((c) => [
                         c[0],

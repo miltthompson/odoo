@@ -354,6 +354,32 @@ test("saving an open, explicitly discarded old draft sends only the current valu
     expect(replacement.key).not.toBe(original.key);
 });
 
+test("discarding an old rejected draft does not resend its invalid payload", async () => {
+    mockDate("2026-01-01T12:00:00");
+    const sent = [];
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        sent.push(params);
+        return params.args[1].name === "Invalid" ? rejection(0, "odoo.exceptions.ValidationError") : [{ id: 47 }];
+    });
+    await makeTestApp();
+    const offline = getService(OfflinePlugin);
+    const id = await offline.scheduleORMDurably("res.partner", "web_save", [[], { name: "Invalid" }], {});
+    const [original] = await offline._queue.list();
+    await offline.syncPendingChanges();
+    expect((await offline._queue.get(original.key)).state).toBe("needs_attention");
+    mockDate("2026-02-02T12:00:00");
+    await offline.discardPendingChange(original.key);
+    const values = [[], { name: "Corrected" }];
+    await offline.scheduleORMDurably("res.partner", "web_save", values, {}, {
+        id, draftCreate: original, createArgs: values,
+    });
+    await offline.syncPendingChanges();
+    expect(sent.map(({ args }) => args[1].name)).toEqual(["Invalid", "Corrected"]);
+    expect(sent[1].key).not.toBe(original.key);
+    expect(await offline._queue.list()).toEqual([]);
+});
+
 test("a draft whose original key is lost is kept for manual recovery", async () => {
     class Lead extends models.Model {
         name = fields.Char();
