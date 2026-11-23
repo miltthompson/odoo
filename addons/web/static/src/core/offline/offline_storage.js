@@ -6,7 +6,7 @@ const KEYS = "keys";
 const ENTRIES = "entries";
 const QUEUE_META = "meta";
 const RESOLVED_RECORDS = "resolved-records";
-const RESOLUTION_TTL = 30 * 24 * 60 * 60 * 1000;
+export const RESOLUTION_TTL = 30 * 24 * 60 * 60 * 1000;
 
 export async function offlineDigest(text) {
     const digest = await window.crypto.subtle.digest("SHA-256", encoder.encode(text));
