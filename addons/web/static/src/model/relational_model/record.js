@@ -1484,13 +1484,10 @@ export class Record extends DataPoint {
         const draft = this.isNew && this._offlineId &&
             this.model.offlinePlugin.getPendingDraftCreate(this.resModel, this._offlineId);
         const reference = await this._offlineReference();
-        // A still-open local form can outlive a discarded create. Save it as a new
-        // draft with all its values instead of leaving it pointing at the removed ID.
-        const discarded = !reference && this._offlineId && isOfflineRecordId(this.resId);
-        if (!reference && !discarded) {
+        if (!reference) {
             return;
         }
-        const creation = (this.isNew && !draft) || discarded;
+        const creation = this.isNew && !draft;
         const key = window.crypto.randomUUID();
         const createdId = creation ? offlineRecordId(key) : undefined;
         const changes = this._getChanges(this._changes, { isNew: creation });
@@ -1498,14 +1495,14 @@ export class Record extends DataPoint {
             call: {
                 model: this.resModel,
                 method: "web_save",
-                args: [this.isNew || discarded ? [] : [reference.value], changes],
+                args: [this.isNew ? [] : [reference.value], changes],
                 kwargs: { context: this.context, specification: {} },
                 options: {
-                    id: discarded ? undefined : this._offlineId,
+                    id: this._offlineId,
                     key,
                     createdId,
                     expectedDraftKey: draft?.key,
-                    refs: reference?.key ? [reference.key] : [],
+                    refs: reference.key ? [reference.key] : [],
                     target: draft ? undefined : { model: this.resModel, ids: [createdId || this.resId] },
                     extras: {
                         ...getScheduleORMExtras(this.model, [this]),

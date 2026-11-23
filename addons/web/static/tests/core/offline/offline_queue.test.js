@@ -106,7 +106,7 @@ test("failed draft saves do not leave a create behind and follow-up saves only s
     expect(edit.args).toEqual([[`offline:${create.key}`], { name: "Updated draft" }]);
 });
 
-test("saving after discarding an open draft queues a new create with all form values", async () => {
+test("an open form cannot queue a change for a discarded local record", async () => {
     class Lead extends models.Model {
         name = fields.Char();
         email = fields.Char();
@@ -127,10 +127,10 @@ test("saving after discarding an open draft queues a new create with all form va
 
     await contains(".o_field_widget[name='name'] input").edit("Saved again");
     await contains(".o_form_button_save").click();
-    const [entry] = await offline._queue.list();
-    expect(entry.key).not.toBe(first.key);
-    expect(entry.refs).toEqual([]);
-    expect(entry.args).toEqual([[], { name: "Saved again", email: "contact@example.com" }]);
+    // An assigned offline ID identifies the discarded record, not a new form.
+    expect(await offline._queue.list()).toEqual([]);
+    expect(".o_form_button_save").toBeVisible();
+    expect(".o_field_widget[name='name'] input").toHaveValue("Saved again");
 });
 
 test("local storage rejects chains referencing a failed queue write", async () => {
