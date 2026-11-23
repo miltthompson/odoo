@@ -396,6 +396,11 @@ export class Record extends DataPoint {
         }
         if (scheduledORM) {
             this._offlineId = scheduledORM.key;
+            if (!this.resId) {
+                this._offlineDraftKey = this.model.offlinePlugin.getPendingDraftCreate(
+                    this.resModel, this._offlineId
+                )?.key;
+            }
             this._offlineChanges = markRaw(
                 this._parseOfflineValues(scheduledORM.value.extras.changes)
             );
@@ -1234,7 +1239,15 @@ export class Record extends DataPoint {
         if (this.model._closeUrgentSaveNotification) {
             this.model._closeUrgentSaveNotification();
         }
+        const offline = this.model.offlinePlugin;
+        const syncedId = !this.resId && offline.getSyncedDraftId(this._offlineDraftKey);
+        if (syncedId) {
+            const resIds = [...new Set([...this.resIds, syncedId])];
+            this.model._updateConfig(this.config, { resId: syncedId, resIds }, { reload: false });
+        }
         const creation = !this.resId;
+        const pendingDraft = creation && this._offlineDraftKey &&
+            offline.getPendingDraftCreate(this.resModel, this._offlineId)?.key === this._offlineDraftKey;
         if (nextId) {
             if (creation) {
                 throw new Error("Cannot set nextId on a new record");
@@ -1270,7 +1283,7 @@ export class Record extends DataPoint {
         ) {
             // We are trying to sa ve urgently because the user is closing the page when offline.
             // Unfortunately, we can't save on IndexedDB before unload.
-            if (this.model.offlinePlugin.isOffline()) {
+            if (pendingDraft || offline.isOffline()) {
                 this.model._closeUrgentSaveNotification = this.model.notification.add(
                     _t(
                         `Heads up! Your recent changes cannot be saved automatically while you are offline. Please click the %(uploadIcon)s button now to ensure your work is saved before you exit this tab.`,
@@ -1313,6 +1326,13 @@ export class Record extends DataPoint {
         const canProceed = await this.model.hooks.onWillSaveRecord(this, changes);
         if (canProceed === false) {
             return false;
+        }
+        if (pendingDraft) {
+            const saved = await this._offlineSave();
+            if (saved) {
+                offline.syncPendingChanges();
+            }
+            return saved;
         }
         // keep x2many orderBy if we stay on the same record
         const orderBys = {};
@@ -1440,6 +1460,7 @@ export class Record extends DataPoint {
                 kwargs: { context: this.context, specification: {} },
                 options: {
                     id: this._offlineId,
+                    draftKey: this._offlineDraftKey,
                     // The queue checks for the original create under its lock. If it was
                     // discarded, a new create must carry all values, not just this edit.
                     createArgs,
@@ -1456,6 +1477,11 @@ export class Record extends DataPoint {
             },
             onSaved: (id) => {
                 this._offlineId = id;
+                if (this.isNew) {
+                    this._offlineDraftKey = this.model.offlinePlugin.getPendingDraftCreate(
+                        this.resModel, id
+                    )?.key ?? this._offlineDraftKey;
+                }
                 this._offlineTimeStamp = timeStamp;
                 this._offlineChanges = offlineChanges;
                 this._commitSave();

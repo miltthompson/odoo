@@ -189,6 +189,45 @@ test("Open shows a follow-up save for an unsent draft while offline", async () =
     ]);
 });
 
+test("saving an opened draft after replay updates the synced record", async () => {
+    class PendingContact extends models.Model {
+        _name = "pending.contact";
+        name = fields.Char();
+        _views = { "form,false": '<form><field name="name"/></form>' };
+        _records = [{ id: 47, name: "Synced contact" }];
+    }
+    defineModels([PendingContact, ...Object.values(webModels)]);
+    defineActions([{ id: 5, res_model: "pending.contact", views: [[false, "form"]] }]);
+    const setOffline = mockOffline();
+    onRpc("/web/offline/sync", () => [{ id: 47 }]);
+    onRpc("web_save", ({ args }) => expect.step(args));
+    await mountWithCleanup(WebClient);
+    await getService("action").doAction(5);
+    await waitFor(".o_form_view");
+    await setOffline(true);
+    const offline = getService(OfflinePlugin);
+    const extras = { actionId: 5, viewType: "form", changes: { name: "Initial" } };
+    const draft = offline.scheduleORM("pending.contact", "web_save", [[], { name: "Initial" }], {}, { extras });
+    offline.scheduleORM("pending.contact", "web_save", [[], { name: "Follow-up" }], {}, {
+        id: draft, extras: { ...extras, changes: { name: "Follow-up" } },
+    });
+    await offline.waitForPendingWrite(offline.getPendingEntry(draft).key);
+    await contains(".o_offline_systray").click();
+    expect.errors(1);
+    await contains(".o_offline_pending_item button:contains(Open):last").click();
+    await waitFor('.o_field_widget[name="name"] input:value(Follow-up)');
+    expect.verifyErrors([
+        'Connection to "/web/dataset/call_kw/pending.contact/onchange" couldn\'t be established',
+    ]);
+
+    await setOffline(false);
+    await offline._syncORM();
+    expect(offline.getPendingEntries()).toEqual([]);
+    await contains('.o_field_widget[name="name"] input').edit("Post-replay edit");
+    await contains(".o_form_button_save").click();
+    expect.verifySteps([[[47], { name: "Post-replay edit" }]]);
+});
+
 test("session expiry is announced without opening the pending-changes panel", async () => {
     onRpc("/web/offline/sync", () => new Response(JSON.stringify({ error: {
         code: 100,
