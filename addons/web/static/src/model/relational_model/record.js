@@ -1471,6 +1471,31 @@ export class Record extends DataPoint {
         }
     }
 
+    _getRecoveryLineTargets(changes) {
+        const targets = {};
+        for (const [fieldName, commands] of Object.entries(changes)) {
+            if (this.fields[fieldName].type !== "one2many") {
+                continue;
+            }
+            const list = this.data[fieldName];
+            const lines = [];
+            for (const [operation, id] of commands) {
+                if (operation !== x2ManyCommands.UPDATE) {
+                    continue;
+                }
+                const index = list.currentIds.indexOf(id);
+                if (index !== -1) {
+                    const data = list._cache[id]?.data;
+                    lines.push({ id, position: index + 1, name: data?.display_name || data?.name });
+                }
+            }
+            if (lines.length) {
+                targets[fieldName] = lines;
+            }
+        }
+        return targets;
+    }
+
     _commitSave(records) {
         this._values = markRaw({ ...this._values, ...this._changes });
         if ("id" in this.activeFields && records) {
@@ -1517,6 +1542,7 @@ export class Record extends DataPoint {
             createArgs = [[], values];
         }
         const timeStamp = this._offlineTimeStamp || Date.now();
+        const manualRecovery = recoveryReason || this._getDraftRecoveryReason(changes);
         return {
             call: {
                 model: this.resModel,
@@ -1526,7 +1552,7 @@ export class Record extends DataPoint {
                 options: {
                     id: this._offlineId,
                     draftCreate: this._offlineDraft,
-                    manualRecovery: recoveryReason || this._getDraftRecoveryReason(changes),
+                    manualRecovery,
                     // The queue checks for the original create under its lock. If it was
                     // discarded, a new create must carry all values, not just this edit.
                     createArgs,
@@ -1538,6 +1564,7 @@ export class Record extends DataPoint {
                             { changes: false }
                         ),
                         timeStamp,
+                        ...(manualRecovery && { recoveryLineTargets: this._getRecoveryLineTargets(changes) }),
                     },
                 },
             },
