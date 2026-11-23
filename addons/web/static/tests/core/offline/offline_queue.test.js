@@ -4,6 +4,7 @@ import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { OfflineQueueStore } from "@web/core/offline/offline_storage";
 import { DynamicGroupList } from "@web/model/relational_model/dynamic_group_list";
 import { DynamicList } from "@web/model/relational_model/dynamic_list";
+import { Record } from "@web/model/relational_model/record";
 import {
     contains, defineModels, fields, getService, makeTestApp, mockOffline, models, mountView,
     onRpc, patchWithCleanup, webModels,
@@ -142,16 +143,28 @@ test("a draft discarded by another tab is recreated with its selected tags", asy
         tag_ids = fields.Many2many({ relation: "tag", default: [6] });
     }
     defineModels([Lead, Tag]);
+    let record;
+    patchWithCleanup(Record.prototype, {
+        setup(config) {
+            super.setup(...arguments);
+            if (config.isRoot) {
+                record = this;
+            }
+        },
+    });
     const setOffline = mockOffline();
     await mountView({
         type: "form", resModel: "lead",
         arch: `<form><field name="name"/><field name="tag_ids" widget="many2many_tags"/></form>`,
     });
     const offline = getService(OfflinePlugin);
-    await setOffline(true);
-    await contains(".o_field_widget[name='name'] input").edit("Initial draft");
-    await contains(".o_form_button_save").click();
+    const [draftId] = await offline.scheduleORMBatch([{
+        model: "lead", method: "web_save", args: [[], { name: "Initial draft" }], kwargs: {},
+        options: { extras: { changes: { name: "Initial draft" } } },
+    }]);
     const [draft] = offline.getPendingEntries();
+    await record.setOfflineChanges(draftId);
+    await setOffline(true);
     // Simulate another tab discarding it without updating this tab's snapshot.
     await offline._queue.lock(() => offline._queue.remove(draft.key));
     expect(offline.getPendingEntries().map(({ key }) => key)).toEqual([draft.key]);
