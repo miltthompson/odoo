@@ -5,7 +5,7 @@ import { OfflineQueueStore } from "@web/core/offline/offline_storage";
 import { DynamicList } from "@web/model/relational_model/dynamic_list";
 import {
     contains, defineModels, fields, getService, makeTestApp, mockOffline, models, mountView,
-    onRpc, patchWithCleanup,
+    onRpc, patchWithCleanup, webModels,
 } from "@web/../tests/web_test_helpers";
 
 function rejection(code, name) {
@@ -211,7 +211,7 @@ test("a failed bulk offline save restores the original values in the view", asyn
             { id: 2, name: "Two", stage: "New" },
         ];
     }
-    defineModels([Lead]);
+    defineModels([Lead, ...Object.values(webModels)]);
     let list;
     patchWithCleanup(DynamicList.prototype, {
         setup() {
