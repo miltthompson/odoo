@@ -14,7 +14,7 @@ import { NonSecureContextError } from "@web/core/errors/non_secure_context_error
 import { _t } from "@web/core/l10n/translation";
 import { normalize } from "@web/core/l10n/utils";
 import { ConnectionLostError, rpc, rpcBus } from "@web/core/network/rpc";
-import { OfflineQueueStore, clearLegacyReadStores, offlineDatabaseName } from "./offline_storage";
+import { OfflineQueueStore, RESOLUTION_TTL, clearLegacyReadStores, offlineDatabaseName } from "./offline_storage";
 import { user } from "@web/core/user";
 import { registry } from "@web/core/registry";
 import { services } from "@web/core/services";
@@ -332,14 +332,20 @@ export class OfflinePlugin extends Plugin {
                 await this._refreshQueue();
             }
             const entries = await Promise.all(calls.map(async (call) => {
-                const draftKey = call.options?.draftKey;
-                const resolution = draftKey && !call.args[0]?.length &&
-                    await this._queue.resolveRecord(call.model, draftKey);
+                const { draftKey, draftTimeStamp } = call.options || {};
+                const draft = draftKey && !call.args[0]?.length &&
+                    await this._getDraftSaveState(call.model, draftKey, draftTimeStamp);
+                if (draft?.unverified) {
+                    return false;
+                }
                 return this._makeEntry({
                     ...call,
-                    options: { ...call.options, resolvedDraftId: resolution?.id },
+                    options: { ...call.options, resolvedDraftId: draft?.resId },
                 });
             }));
+            if (entries.includes(false)) {
+                return;
+            }
             let saved;
             try {
                 if (entries.some((entry) => this._hasUnsavedDependency(entry))) {
@@ -604,20 +610,29 @@ export class OfflinePlugin extends Plugin {
             this._pending().some((earlier) => earlier.seq === null && entry.refs.includes(earlier.key));
     }
 
-    async getDraftSaveState(model, key) {
+    async getDraftSaveState(model, key, timeStamp) {
         try {
             return await this._queue.lock(async () => {
-                const entries = await this._refreshQueue();
-                const resolution = await this._queue.resolveRecord(model, key);
-                const resId = resolution?.id;
-                const pending = entries.some((entry) => entry.model === model && (
-                    entry.key === key || (resId && entry.target.ids.includes(resId))
-                ));
-                return { resId, pending };
+                await this._refreshQueue();
+                return this._getDraftSaveState(model, key, timeStamp);
             });
         } catch {
             this._reportStorageError();
         }
+    }
+
+    // Both callers hold the queue lock and have refreshed the pending entries.
+    async _getDraftSaveState(model, key, timeStamp) {
+        const resolution = await this._queue.resolveRecord(model, key);
+        const entries = this._pending().filter((entry) => entry.model === model);
+        const resId = resolution?.id ?? entries.find((entry) =>
+            entry.resolvedResId && entry.args[0]?.[0] === `offline:${key}`
+        )?.resolvedResId;
+        const pending = entries.some((entry) => entry.key === key ||
+            (resId && entry.target.ids.includes(resId)));
+        // Once a receipt could have expired, a missing create no longer proves it was discarded.
+        const unverified = !resId && !pending && !(Date.now() - timeStamp < RESOLUTION_TTL);
+        return { resId, pending, unverified };
     }
 
     syncPendingChanges() {
@@ -681,8 +696,9 @@ export class OfflinePlugin extends Plugin {
     }
 
     _compatEntry(entry) {
-        const { model, method, args, legacyArgs, kwargs, extras } = entry;
-        return { key: entry.legacyKey, value: { model, method, args: legacyArgs || args, kwargs, extras } };
+        const { model, method, args, legacyArgs, kwargs, extras, resolvedResId } = entry;
+        const formArgs = resolvedResId ? [[resolvedResId], ...args.slice(1)] : legacyArgs || args;
+        return { key: entry.legacyKey, value: { model, method, args: formArgs, kwargs, extras } };
     }
 
     async _refreshQueue() {

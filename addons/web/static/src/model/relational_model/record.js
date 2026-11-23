@@ -397,9 +397,7 @@ export class Record extends DataPoint {
         if (scheduledORM) {
             this._offlineId = scheduledORM.key;
             if (this.isNew) {
-                this._offlineDraftKey = this.model.offlinePlugin.getPendingDraftCreate(
-                    this.resModel, this._offlineId
-                )?.key;
+                this._trackOfflineDraft(this._offlineId);
             }
             this._offlineChanges = markRaw(
                 this._parseOfflineValues(scheduledORM.value.extras.changes)
@@ -1235,6 +1233,14 @@ export class Record extends DataPoint {
         this._activeFieldsToRestore = undefined;
     }
 
+    _trackOfflineDraft(legacyKey) {
+        const create = this.model.offlinePlugin.getPendingDraftCreate(this.resModel, legacyKey);
+        if (create) {
+            this._offlineDraftKey = create.key;
+            this._offlineDraftTimeStamp = create.acted_at;
+        }
+    }
+
     async _save({ reload = true, onError, nextId } = {}) {
         if (this.model._closeUrgentSaveNotification) {
             this.model._closeUrgentSaveNotification();
@@ -1243,13 +1249,22 @@ export class Record extends DataPoint {
         const urgent = this.model._urgentSave && this.model.useSendBeaconToSaveUrgently &&
             !this.model.env.inDialog;
         let pendingDraft = false;
+        let replayedDraft = false;
         if (this._offlineDraftKey) {
             if (urgent) {
                 // A beacon can't safely wait for the queue or preserve its ordering.
                 pendingDraft = true;
             } else {
-                const state = await offline.getDraftSaveState(this.resModel, this._offlineDraftKey);
+                const state = await offline.getDraftSaveState(
+                    this.resModel, this._offlineDraftKey, this._offlineDraftTimeStamp
+                );
                 if (!state) {
+                    return false;
+                }
+                if (state.unverified && !this.resId) {
+                    this.model.notification.add(_t(
+                        "This draft's sync status can no longer be verified. Find the record before saving again."
+                    ), { type: "warning" });
                     return false;
                 }
                 if (state.resId && !this.resId) {
@@ -1257,9 +1272,7 @@ export class Record extends DataPoint {
                     this.model._updateConfig(this.config, { resId: state.resId, resIds }, { reload: false });
                 }
                 pendingDraft = state.pending;
-                if (state.resId && !pendingDraft) {
-                    this._offlineDraftKey = undefined;
-                }
+                replayedDraft = Boolean(this.resId);
             }
         }
         const creation = !this.resId;
@@ -1281,6 +1294,12 @@ export class Record extends DataPoint {
         }
         const changes = this._getChanges();
         delete changes.id; // id never changes, and should not be written
+        if ((pendingDraft || replayedDraft) && this._hasUnmappedDraftCommands(changes)) {
+            this.model.notification.add(_t(
+                "These line changes cannot be matched to the saved record. Reopen the record and reapply your edits."
+            ), { type: "warning" });
+            return false;
+        }
         if ((!creation || this._offlineId) && !Object.keys(changes).length) {
             if (nextId) {
                 return this.model.load({ resId: nextId });
@@ -1344,6 +1363,8 @@ export class Record extends DataPoint {
             }
             return saved;
         }
+        // Reload a replayed draft to replace browser-only line IDs with their server IDs.
+        reload ||= replayedDraft;
         // keep x2many orderBy if we stay on the same record
         const orderBys = {};
         if (!nextId) {
@@ -1410,10 +1431,21 @@ export class Record extends DataPoint {
                 this.model.hooks.onWillLoadRoot(this.config);
             }
             this._setData(records[0], { orderBys });
+            if (replayedDraft) {
+                this._offlineDraftKey = undefined;
+            }
         } else {
             this._commitSave(records);
         }
         return true;
+    }
+
+    _hasUnmappedDraftCommands(changes) {
+        const { UPDATE, DELETE, UNLINK } = x2ManyCommands;
+        return Object.entries(changes).some(([name, commands]) =>
+            ["one2many", "many2many"].includes(this.fields[name]?.type) &&
+            commands.some(([op, id]) => [UPDATE, DELETE, UNLINK].includes(op) && typeof id === "string")
+        );
     }
 
     _commitSave(records) {
@@ -1471,6 +1503,7 @@ export class Record extends DataPoint {
                 options: {
                     id: this._offlineId,
                     draftKey: this._offlineDraftKey,
+                    draftTimeStamp: this._offlineDraftTimeStamp,
                     // The queue checks for the original create under its lock. If it was
                     // discarded, a new create must carry all values, not just this edit.
                     createArgs,
@@ -1488,9 +1521,7 @@ export class Record extends DataPoint {
             onSaved: (id) => {
                 this._offlineId = id;
                 if (this.isNew) {
-                    this._offlineDraftKey = this.model.offlinePlugin.getPendingDraftCreate(
-                        this.resModel, id
-                    )?.key ?? this._offlineDraftKey;
+                    this._trackOfflineDraft(id);
                 }
                 this._offlineTimeStamp = timeStamp;
                 this._offlineChanges = offlineChanges;
