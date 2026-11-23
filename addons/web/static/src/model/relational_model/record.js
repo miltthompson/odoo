@@ -402,7 +402,10 @@ export class Record extends DataPoint {
             this._offlineId = scheduledORM.key;
             if (this.isNew) {
                 this._trackOfflineDraft(this._offlineId);
-            } else if (scheduledORM.value.resolvedResId === this.resId) {
+            } else if (scheduledORM.value.method === "web_save" &&
+                scheduledORM.value.model === this.resModel &&
+                (scheduledORM.value.resolvedResId ?? scheduledORM.value.args[0]?.[0]) === this.resId) {
+                // Edits using the server ID still need to wait behind older queued changes.
                 this._queuedDraftResId = this.resId;
             }
             this._offlineChanges = markRaw(
