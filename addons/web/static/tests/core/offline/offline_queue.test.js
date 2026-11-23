@@ -714,6 +714,48 @@ test("the form pager moves after saving behind a rejected edit", async () => {
     expect.verifySteps([]);
 });
 
+test("paging after a queued save restores a queued edit on the destination record", async () => {
+    class Lead extends models.Model {
+        name = fields.Char();
+        _records = [{ id: 47, name: "First" }, { id: 48, name: "Second" }];
+    }
+    defineModels([Lead]);
+    let record;
+    patchWithCleanup(Record.prototype, {
+        setup(config) {
+            super.setup(...arguments);
+            if (config.isRoot) {
+                record = this;
+            }
+        },
+    });
+    onRpc("web_save", () => expect.step("unexpected direct write"));
+    onRpc("/web/offline/sync", () => rejection(0, "odoo.exceptions.AccessError"));
+    await mountView({
+        type: "form", resModel: "lead", resId: 47, resIds: [47, 48], config: { actionId: 42 },
+        arch: `<form><field name="name"/></form>`,
+    });
+    const offline = getService(OfflinePlugin);
+    const queue = (id, name) => {
+        const changes = { name };
+        return offline.scheduleORMDurably("lead", "web_save", [[id], changes], {}, {
+            extras: { actionId: 42, viewType: "form", changes },
+        });
+    };
+    const first = await queue(47, "Rejected source edit");
+    await queue(48, "Queued destination edit");
+    await offline.syncPendingChanges();
+    await record.setOfflineChanges(first);
+    await contains("[name='name'] input").edit("New source edit");
+
+    expect(await record.save({ nextId: 48 })).toBe(true);
+    expect(record.resId).toBe(48);
+    expect(record.data.name).toBe("Queued destination edit");
+    await offline.syncPendingChanges();
+    expect((await offline._queue.list()).at(-1).args).toEqual([[47], { name: "New source edit" }]);
+    expect.verifySteps([]);
+});
+
 test("an old draft label does not make a newly queued replacement eligible for recovery", async () => {
     mockDate("2026-02-02T12:00:00");
     await makeTestApp();
