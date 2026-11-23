@@ -399,6 +399,8 @@ export class Record extends DataPoint {
             this._offlineId = scheduledORM.key;
             if (this.isNew) {
                 this._trackOfflineDraft(this._offlineId);
+            } else if (scheduledORM.value.resolvedResId === this.resId) {
+                this._queuedDraftResId = this.resId;
             }
             this._offlineChanges = markRaw(
                 this._parseOfflineValues(scheduledORM.value.extras.changes)
@@ -1260,12 +1262,13 @@ export class Record extends DataPoint {
         let pendingDraft = false;
         let replayedDraft = false;
         let recoveringDraft = false;
-        if (this.hasOfflineDraft) {
+        if (this.hasOfflineDraft || this._queuedDraftResId) {
             if (urgent) {
                 // A beacon can't safely wait for the queue or preserve its ordering.
                 pendingDraft = true;
-            } else if (this._offlineDraft) {
-                const state = await offline.getDraftSaveState(this.resModel, this._offlineDraft);
+            } else if (this._offlineDraft || this._queuedDraftResId) {
+                const draft = this._offlineDraft || { resId: this._queuedDraftResId };
+                const state = await offline.getDraftSaveState(this.resModel, draft);
                 if (!state) {
                     return false;
                 }
@@ -1274,7 +1277,10 @@ export class Record extends DataPoint {
                 }
                 recoveringDraft = state.recover && !this.resId;
                 pendingDraft = state.pending || recoveringDraft;
-                replayedDraft = Boolean(this.resId);
+                replayedDraft = Boolean(this._offlineDraft && this.resId);
+                if (!pendingDraft) {
+                    this._queuedDraftResId = undefined;
+                }
             }
         }
         const creation = !this.resId;

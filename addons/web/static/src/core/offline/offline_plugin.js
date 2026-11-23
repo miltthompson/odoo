@@ -625,16 +625,17 @@ export class OfflinePlugin extends Plugin {
     }
 
     // Both callers hold the queue lock and have refreshed the pending entries.
-    async _getDraftSaveState(model, { key, acted_at: timeStamp }) {
-        const resolution = await this._queue.resolveRecord(model, key);
+    async _getDraftSaveState(model, { key, queued_at, acted_at, resId: knownId }) {
+        const resolution = key && await this._queue.resolveRecord(model, key);
         const entries = this._pending().filter((entry) => entry.model === model);
-        const resId = resolution?.id ?? entries.find((entry) =>
+        const resId = knownId ?? resolution?.id ?? entries.find((entry) =>
             entry.resolvedResId && entry.args[0]?.[0] === `offline:${key}`
         )?.resolvedResId;
         const pending = entries.some((entry) => entry.key === key ||
             (resId && entry.target.ids.includes(resId)));
         // A missing create can mean its local receipt expired instead of being discarded.
-        const recover = !resId && !pending && !(Date.now() - timeStamp < RESOLUTION_TTL);
+        const recover = Boolean(key && !resId && !pending &&
+            !(Date.now() - (queued_at ?? acted_at) < RESOLUTION_TTL));
         return { resId, pending, recover };
     }
 
@@ -649,6 +650,7 @@ export class OfflinePlugin extends Plugin {
 
     _makeEntry({ model, method, args, kwargs, options = {} }) {
         const extras = options.extras;
+        const queued_at = Date.now();
         const legacyKey = options.id ?? hashCode(JSON.stringify({ model, method, args, kwargs, extras }));
         const targetIds = (method !== "create" && Array.isArray(args[0]) &&
             args[0].filter((id) => typeof id === "number" || typeof id === "string")) || [];
@@ -675,7 +677,8 @@ export class OfflinePlugin extends Plugin {
             target: options.target || { model, ids: create ? [`offline:${create.key}`] : targetIds },
             steps: options.steps,
             label: options.label || extras?.displayName || "",
-            acted_at: extras?.timeStamp ?? Date.now(),
+            acted_at: extras?.timeStamp ?? queued_at,
+            queued_at,
             server_version: session.registry_hash,
             state: options.manualRecovery || extras?.error ? "needs_attention" : "waiting",
             error: options.manualRecovery || extras?.error || null,
@@ -704,6 +707,7 @@ export class OfflinePlugin extends Plugin {
         const { model, method, args, legacyArgs, kwargs, extras, resolvedResId } = entry;
         const formArgs = resolvedResId ? [[resolvedResId], ...args.slice(1)] : legacyArgs || args;
         return { key: entry.legacyKey, value: { model, method, args: formArgs, kwargs, extras,
+            ...(resolvedResId && { resolvedResId }),
             ...(entry.manualRecovery && { manualRecovery: true }),
         } };
     }
