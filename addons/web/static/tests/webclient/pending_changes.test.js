@@ -207,9 +207,6 @@ test("Open shows a follow-up save for an unsent draft while offline", async () =
     await mountWithCleanup(WebClient);
     await getService("action").doAction(5);
     await waitFor(".o_form_view");
-    // The fallback opens the cached new-record form with resId explicitly unset.
-    // Keep the mock default lookup available for that action configuration.
-    onRpc("pending.contact", "onchange", () => ({ value: { name: false } }));
     await setOffline(true);
     const offline = getService(OfflinePlugin);
     const base = { actionId: 5, viewType: "form" };
@@ -222,8 +219,13 @@ test("Open shows a follow-up save for an unsent draft while offline", async () =
     await offline.waitForPendingWrite(offline.getPendingEntry(draft).key);
     await contains(".o_offline_systray").click();
     expect(".o_offline_pending_item button:contains(Open)").toHaveCount(2);
+    // The cached form opens even if its background revalidation can't reach the server.
+    expect.errors(1);
     await contains(".o_offline_pending_item button:contains(Open):last").click();
     await waitFor(".o_form_view .o_field_widget[name='name']:contains(Updated draft)");
+    expect.verifyErrors([
+        'Connection to "/web/dataset/call_kw/pending.contact/onchange" couldn\'t be established',
+    ]);
 });
 
 test("session expiry is announced without opening the pending-changes panel", async () => {
