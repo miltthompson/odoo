@@ -1527,9 +1527,9 @@ export class Record extends DataPoint {
             }
             const list = this.data[fieldName];
             const defaultOrder = this.activeFields[fieldName]?.defaultOrderBy || [];
-            const reordered = list.orderBy.length !== defaultOrder.length || list.orderBy.some(
-                ({ name, asc }, index) => name !== defaultOrder[index].name || asc !== defaultOrder[index].asc
-            );
+            // Even the default sort can put draft lines in a different order after
+            // sync (for example, sorting by ID when the lines don't have one yet).
+            const hasSort = list.orderBy.length || defaultOrder.length;
             const lines = [];
             for (const [operation, id, values] of commands) {
                 if (operation !== x2ManyCommands.UPDATE || (Number.isSafeInteger(id) && id > 0)) {
@@ -1537,20 +1537,33 @@ export class Record extends DataPoint {
                 }
                 const line = list._cache[id];
                 const index = list.currentIds.indexOf(id);
-                if (!reordered && index !== -1) {
+                if (!hasSort && index !== -1) {
                     const data = line?.data;
                     lines.push({ id, position: index + 1, name: data?.display_name || data?.name });
                 } else if (line) {
-                    // Open restores the view's default order. Use the previous field values
-                    // instead of a row number from a different sort order.
-                    const names = new Set(["name", ...list.orderBy.map(({ name }) => name), ...Object.keys(values)]);
-                    const original = {};
-                    for (const name of names) {
-                        const value = line._values[name];
-                        if (name !== "id" && value !== undefined && [
-                            "char", "integer", "float", "monetary", "boolean", "selection", "date", "datetime", "many2one",
-                        ].includes(line.fields[name]?.type)) {
-                            original[name] = value;
+                    // A virtual row's UPDATE can include its entire create payload.
+                    const changedFields = Object.keys(values).filter((name) => name in line._changes);
+                    const names = new Set(["name", ...list.orderBy.map(({ name }) => name), ...changedFields]);
+                    const canDescribe = (name) => name !== "id" && line._values[name] !== undefined && [
+                        "char", "integer", "float", "monetary", "boolean", "selection", "date", "datetime", "many2one",
+                    ].includes(line.fields[name]?.type);
+                    const original = Object.fromEntries([...names].filter(canDescribe).map((name) => [name, line._values[name]]));
+                    const hintValue = (value) => value?.display_name ?? value?.valueOf();
+                    const matches = (other, name) => hintValue(other._values[name]) === hintValue(line._values[name]);
+                    let matchingLines = list.currentIds.map((key) => list._cache[key]).filter((other) =>
+                        other && other !== line && Object.keys(original).every((name) => matches(other, name))
+                    );
+                    // Add visible values only when they distinguish the line from a matching row.
+                    for (const name of Object.keys(list.activeFields)) {
+                        if (!matchingLines.length) {
+                            break;
+                        }
+                        if (!names.has(name) && canDescribe(name) && line.activeFields[name] && !line._isInvisible(name)) {
+                            const remaining = matchingLines.filter((other) => matches(other, name));
+                            if (remaining.length < matchingLines.length) {
+                                original[name] = line._values[name];
+                                matchingLines = remaining;
+                            }
                         }
                     }
                     lines.push({ id, original: line._formatOfflineValues(original, { changes: false }) });
