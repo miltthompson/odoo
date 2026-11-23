@@ -1,4 +1,5 @@
 import { checkRainbowmanMessage } from "@crm/views/check_rainbowman_message";
+import { ConnectionLostError } from "@web/core/network/rpc";
 import { registry } from "@web/core/registry";
 import { formView } from "@web/views/form/form_view";
 
@@ -47,8 +48,15 @@ class CrmFormRecord extends formView.Model.Record {
         }
 
         const res = await super._save(...arguments);
-        if (res && changeStage) {
-            await checkRainbowmanMessage(this.model.orm, this.model.effect, this.resId);
+        if (res && changeStage && !this.model.offlinePlugin.isOffline()) {
+            try {
+                await checkRainbowmanMessage(this.model.orm, this.model.effect, this.resId);
+            } catch (error) {
+                // This optional effect must not block navigation if the connection drops after saving.
+                if (!(error instanceof ConnectionLostError)) {
+                    throw error;
+                }
+            }
         }
         return res;
     }
