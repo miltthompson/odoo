@@ -135,6 +135,8 @@ export class OfflineQueueStore {
 
 export function clearLegacyReadStores() {
     return Promise.all([
+        // Match only read caches; leave the legacy write store and database version alone.
+        new IndexedDB("offline").invalidate([/^visited-ui-items/, /^many2x_/]),
         new IndexedDB("rpc").invalidate(),
         new IndexedDB("webclient_menu").invalidate(),
     ]);
