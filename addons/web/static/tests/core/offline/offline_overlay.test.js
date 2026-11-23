@@ -19,7 +19,6 @@ import { isOfflineRecordId, offlineRecordId } from "@web/core/offline/offline_id
 import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { registry } from "@web/core/registry";
 import { user } from "@web/core/user";
-import { Deferred } from "@web/core/utils/concurrency";
 import {
     getOfflineOverlay,
     overlayGroups,
@@ -209,7 +208,7 @@ async function mountOverlayView(type, template, resId, params) {
         currency_id = fields.Many2one({ relation: "res.currency" });
         revenue = fields.Monetary({ aggregator: "sum", currency_field: "currency_id" });
         line_ids = fields.One2many({ relation: "lead.line", relation_field: "lead_id" });
-        _records = [{ id: 1, name: "Saved lead", active: true }];
+        _records = [{ id: 1, name: "Saved lead", active: true, line_ids: [21] }];
     }
     class LeadLine extends models.Model {
         _name = "lead.line";
@@ -358,15 +357,16 @@ test("a grouped monetary view warms offline currency rates without blocking its 
             return { id: 1, currency_id: 1 };
         },
     });
-    const readStarted = new Deferred();
-    const rateResponse = new Deferred();
+    const readStarted = Promise.withResolvers();
+    const rateResponse = Promise.withResolvers();
     onRpc("/web/dataset/call_kw/res.currency/read", () => {
         readStarted.resolve();
-        return rateResponse;
+        return rateResponse.promise;
     });
     await mountOverlayView("list", `<field name="stage_id"/><field name="revenue" sum="Total"/>`,
         undefined, { groupBy: ["stage_id"] });
-    await readStarted;
+    await readStarted.promise;
+    expect(".o_list_view").toBeVisible();
     rateResponse.resolve([{ id: 2, inverse_rate: 0.5, rate_date: "2025-01-01" }]);
     await animationFrame();
 });
