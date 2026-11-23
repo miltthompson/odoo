@@ -63,7 +63,6 @@ export class OfflinePlugin extends Plugin {
     _writes = Promise.resolve();
     // A caller may already hold a reference to an entry whose local write failed.
     _failedWriteKeys = new Set();
-    _syncedDraftIds = new Map();
     _syncAgain = false;
     _visitedUITable = computed(() =>
         this.debugMode.isActive()
@@ -329,10 +328,18 @@ export class OfflinePlugin extends Plugin {
             if (calls.some(({ method, args, options }) =>
                 method === "web_save" && !args[0]?.length && options?.id !== undefined
             )) {
-                // A different tab may have discarded the draft since our last read.
+                // Another tab may have discarded or synced the draft since our last read.
                 await this._refreshQueue();
             }
-            const entries = calls.map((call) => this._makeEntry(call));
+            const entries = await Promise.all(calls.map(async (call) => {
+                const draftKey = call.options?.draftKey;
+                const resolution = draftKey && !call.args[0]?.length &&
+                    await this._queue.resolveRecord(call.model, draftKey);
+                return this._makeEntry({
+                    ...call,
+                    options: { ...call.options, resolvedDraftId: resolution?.id },
+                });
+            }));
             let saved;
             try {
                 if (entries.some((entry) => this._hasUnsavedDependency(entry))) {
@@ -597,8 +604,20 @@ export class OfflinePlugin extends Plugin {
             this._pending().some((earlier) => earlier.seq === null && entry.refs.includes(earlier.key));
     }
 
-    getSyncedDraftId(key) {
-        return this._syncedDraftIds.get(key);
+    async getDraftSaveState(model, key) {
+        try {
+            return await this._queue.lock(async () => {
+                const entries = await this._refreshQueue();
+                const resolution = await this._queue.resolveRecord(model, key);
+                const resId = resolution?.id;
+                const pending = entries.some((entry) => entry.model === model && (
+                    entry.key === key || (resId && entry.target.ids.includes(resId))
+                ));
+                return { resId, pending };
+            });
+        } catch {
+            this._reportStorageError();
+        }
     }
 
     syncPendingChanges() {
@@ -618,7 +637,7 @@ export class OfflinePlugin extends Plugin {
         // Before a pending create has a record ID, the legacy form reuses its UI key
         // when reopened. Keep that key, but send the next save as a separate write.
         const draftSave = options.id !== undefined && method === "web_save" && !args[0]?.length;
-        const syncedId = draftSave && this.getSyncedDraftId(options.draftKey);
+        const syncedId = draftSave && options.resolvedDraftId;
         const create = draftSave && !syncedId && this.getPendingDraftCreate(model, legacyKey);
         if (syncedId) {
             args = [[syncedId], ...args.slice(1)];
@@ -782,9 +801,9 @@ export class OfflinePlugin extends Plugin {
                         if (method === "web_save" && !args[0]?.length) {
                             const id = result?.already_applied ? result.created_ids[0] : result?.[0]?.id;
                             if (Number.isSafeInteger(id) && id > 0) {
-                                // Keep the replay reference for ordering, but open the saved record.
+                                // Persist before removing the create so other tabs distinguish it from a discard.
+                                await this._queue.recordResolution(model, key, key, id);
                                 const updated = await this._queue.rememberDraftRecord(key, model, id);
-                                this._syncedDraftIds.set(key, id);
                                 for (const edit of updated) {
                                     this._replaceEntry(edit);
                                 }

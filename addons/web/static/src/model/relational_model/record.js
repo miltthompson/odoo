@@ -396,7 +396,7 @@ export class Record extends DataPoint {
         }
         if (scheduledORM) {
             this._offlineId = scheduledORM.key;
-            if (!this.resId) {
+            if (this.isNew) {
                 this._offlineDraftKey = this.model.offlinePlugin.getPendingDraftCreate(
                     this.resModel, this._offlineId
                 )?.key;
@@ -1240,14 +1240,26 @@ export class Record extends DataPoint {
             this.model._closeUrgentSaveNotification();
         }
         const offline = this.model.offlinePlugin;
-        const syncedId = !this.resId && offline.getSyncedDraftId(this._offlineDraftKey);
-        if (syncedId) {
-            const resIds = [...new Set([...this.resIds, syncedId])];
-            this.model._updateConfig(this.config, { resId: syncedId, resIds }, { reload: false });
+        const urgent = this.model._urgentSave && this.model.useSendBeaconToSaveUrgently &&
+            !this.model.env.inDialog;
+        let pendingDraft = false;
+        if (this._offlineDraftKey) {
+            if (urgent) {
+                // A beacon can't safely wait for the queue or preserve its ordering.
+                pendingDraft = true;
+            } else {
+                const state = await offline.getDraftSaveState(this.resModel, this._offlineDraftKey);
+                if (!state) {
+                    return false;
+                }
+                if (state.resId && !this.resId) {
+                    const resIds = [...new Set([...this.resIds, state.resId])];
+                    this.model._updateConfig(this.config, { resId: state.resId, resIds }, { reload: false });
+                }
+                pendingDraft = state.pending;
+            }
         }
         const creation = !this.resId;
-        const pendingDraft = creation && this._offlineDraftKey &&
-            offline.getPendingDraftCreate(this.resModel, this._offlineId)?.key === this._offlineDraftKey;
         if (nextId) {
             if (creation) {
                 throw new Error("Cannot set nextId on a new record");
@@ -1276,13 +1288,8 @@ export class Record extends DataPoint {
             this.dirty = false;
             return true;
         }
-        if (
-            this.model._urgentSave &&
-            this.model.useSendBeaconToSaveUrgently &&
-            !this.model.env.inDialog
-        ) {
-            // We are trying to sa ve urgently because the user is closing the page when offline.
-            // Unfortunately, we can't save on IndexedDB before unload.
+        if (urgent) {
+            // There is not enough time to persist queued changes during page unload.
             if (pendingDraft || offline.isOffline()) {
                 this.model._closeUrgentSaveNotification = this.model.notification.add(
                     _t(
