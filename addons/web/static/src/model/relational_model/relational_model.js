@@ -608,23 +608,30 @@ export class RelationalModel extends Model {
         config.groups = config.groups || {};
 
         let response = await this._webReadGroup(config, cache);
-        if (this.shouldApplyOfflineOverlay) {
-            const overlay = await this._getOfflineOverlayOnLoad(config);
-            if (overlay.size) {
-                let rates;
-                const company = user.activeCompany;
-                const companyId = config.context.allowed_company_ids?.[0];
-                const companyCurrency = !companyId || companyId === company?.id ? company?.currency_id : undefined;
-                if (companyCurrency && config.fieldsToAggregate.some((name) => config.fields[name]?.currency_field)) {
-                    try {
-                        rates = await getCurrencyRates();
-                    } catch (error) {
-                        if (!(error instanceof ConnectionLostError)) {
-                            throw error;
+        if (this.constructor.offlineOverlay) {
+            const company = user.activeCompany;
+            const companyId = config.context.allowed_company_ids?.[0];
+            const companyCurrency = !companyId || companyId === company?.id ? company?.currency_id : undefined;
+            const hasMonetaryAggregate = companyCurrency &&
+                config.fieldsToAggregate.some((name) => config.fields[name]?.currency_field);
+            if (this.shouldApplyOfflineOverlay) {
+                const overlay = await this._getOfflineOverlayOnLoad(config);
+                if (overlay.size) {
+                    let rates;
+                    if (hasMonetaryAggregate) {
+                        try {
+                            rates = await getCurrencyRates();
+                        } catch (error) {
+                            if (!(error instanceof ConnectionLostError)) {
+                                throw error;
+                            }
                         }
                     }
+                    response = overlayGroups(response, config, overlay, rates, companyCurrency);
                 }
-                response = overlayGroups(response, config, overlay, rates, companyCurrency);
+            } else if (hasMonetaryAggregate) {
+                // Warm the disk cache while connected, without blocking the view.
+                getCurrencyRates().catch(() => {});
             }
         }
         return this._postprocessReadGroup(config, response);

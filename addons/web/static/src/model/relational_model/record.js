@@ -3,6 +3,7 @@ import { serializeDate, serializeDateTime } from "@web/core/l10n/dates";
 import { _t } from "@web/core/l10n/translation";
 import { ConnectionLostError, RPCError } from "@web/core/network/rpc";
 import { isOfflineRecordId, offlineRecordId } from "@web/core/offline/offline_id";
+import { x2ManyCommands } from "@web/core/orm_plugin";
 import { evaluateBooleanExpr } from "@web/core/py_js/py";
 import { pick } from "@web/core/utils/objects";
 import { DataPoint } from "./datapoint";
@@ -99,9 +100,21 @@ export class Record extends DataPoint {
      * @param {RecordType<string, unknown>} data
      * @param {FieldSpecifications} [params]
      */
-    _setData(data, { orderBys, keepChanges } = {}) {
+    _setData(data, { orderBys, keepChanges, fromOfflineEntry } = {}) {
         this._isEvalContextReady = false;
-        if (this.resId && !isOfflineRecordId(this.resId)) {
+        if (fromOfflineEntry) {
+            // Reuse hydrated children when the saved snapshot only knows their IDs and labels.
+            const currentValues = {};
+            for (const [name, value] of Object.entries(data)) {
+                const ids = this.data[name]?.currentIds;
+                if (ids && Array.isArray(value) && ids.length === value.length &&
+                    ids.every((id, index) => id === (value[index]?.id ?? value[index]))) {
+                    currentValues[name] = this.data[name];
+                }
+            }
+            this._values = markRaw({ ...this.data, ...this._parseServerValues(data, { currentValues }) });
+            Object.assign(this._textValues, this._getTextValues(data));
+        } else if (this.resId && !isOfflineRecordId(this.resId)) {
             this._values = this._parseServerValues(data, { orderBys });
             Object.assign(this._textValues, this._getTextValues(data));
         } else {
@@ -401,16 +414,15 @@ export class Record extends DataPoint {
                 // A compatibility link can still open the cached blank form.
                 this.config.resId = entry.createdId;
                 this.config.resIds = [entry.createdId];
+            } else if (!this.resId) {
+                this._offlineDraftKey = this.model.offlinePlugin.getPendingDraftCreate(
+                    this.resModel, this._offlineId
+                )?.key;
             }
             if (exactEntry?.extras?.overlayValues &&
                 (this.model.shouldApplyOfflineOverlay || isOfflineRecordId(this.resId))) {
                 const { overlayBefore, overlayValues } = exactEntry.extras;
-                this._setData({
-                    ...this._offlineOverlayValues(this.data),
-                    ...overlayBefore,
-                    ...overlayValues,
-                    id: this.resId,
-                });
+                this._setData({ ...overlayBefore, ...overlayValues, id: this.resId }, { fromOfflineEntry: true });
             } else if (entry?.createdId) {
                 const change = this.model.getOfflineOverlay(this.config, this.resId).get(this.resId);
                 this._setData({ ...this._getDefaultValues(), ...change?.patch, id: this.resId });
@@ -1250,7 +1262,15 @@ export class Record extends DataPoint {
         if (this.model._closeUrgentSaveNotification) {
             this.model._closeUrgentSaveNotification();
         }
+        const offline = this.model.offlinePlugin;
+        const syncedId = !this.resId && offline.getSyncedDraftId(this._offlineDraftKey);
+        if (syncedId) {
+            const resIds = [...new Set([...this.resIds, syncedId])];
+            this.model._updateConfig(this.config, { resId: syncedId, resIds }, { reload: false });
+        }
         const creation = !this.resId;
+        const pendingDraft = creation && this._offlineDraftKey &&
+            offline.getPendingDraftCreate(this.resModel, this._offlineId)?.key === this._offlineDraftKey;
         if (nextId) {
             if (creation) {
                 throw new Error("Cannot set nextId on a new record");
@@ -1284,10 +1304,9 @@ export class Record extends DataPoint {
             this.model.useSendBeaconToSaveUrgently &&
             !this.model.env.inDialog
         ) {
-            // There isn't time for a durable IndexedDB save during page unload, and
-            // a temporary record ID must never reach the normal web_save route.
-            const localRecord = isOfflineRecordId(this.resId);
-            if (localRecord || this.model.offlinePlugin.isOffline()) {
+            // There isn't time to persist offline changes during page unload.
+            const localRecord = pendingDraft || isOfflineRecordId(this.resId);
+            if (localRecord || offline.isOffline()) {
                 const icons = { uploadIcon: markup`<i class="oi oi-fw" data-icon="cloud_upload"></i>` };
                 this.model._closeUrgentSaveNotification = this.model.notification.add(
                     localRecord
@@ -1330,6 +1349,13 @@ export class Record extends DataPoint {
         const canProceed = await this.model.hooks.onWillSaveRecord(this, changes);
         if (canProceed === false) {
             return false;
+        }
+        if (pendingDraft) {
+            const saved = await this._offlineSave();
+            if (saved) {
+                offline.syncPendingChanges();
+            }
+            return saved;
         }
         // keep x2many orderBy if we stay on the same record
         const orderBys = {};
@@ -1481,16 +1507,28 @@ export class Record extends DataPoint {
     }
 
     async _prepareOfflineSave() {
-        const draft = this.isNew && this._offlineId &&
-            this.model.offlinePlugin.getPendingDraftCreate(this.resModel, this._offlineId);
         const reference = await this._offlineReference();
         if (!reference) {
             return;
         }
-        const creation = this.isNew && !draft;
         const key = window.crypto.randomUUID();
-        const createdId = creation ? offlineRecordId(key) : undefined;
-        const changes = this._getChanges(this._changes, { isNew: creation });
+        const editingDraft = this.isNew && this._offlineId;
+        const changes = this._getChanges(this._changes, { isNew: this.isNew && !editingDraft });
+        let createArgs;
+        if (editingDraft) {
+            const values = this._getChanges();
+            const { CREATE, UPDATE, DELETE, set } = x2ManyCommands;
+            for (const [fieldName, commands] of Object.entries(values)) {
+                if (this.fields[fieldName].type === "many2many") {
+                    // Committing a draft clears its commands, but not its selected tags.
+                    values[fieldName] = [
+                        set(this.data[fieldName].currentIds.filter((id) => typeof id === "number")),
+                        ...commands.filter(([op]) => op === CREATE || op === UPDATE || op === DELETE),
+                    ];
+                }
+            }
+            createArgs = [[], values];
+        }
         return {
             call: {
                 model: this.resModel,
@@ -1500,26 +1538,33 @@ export class Record extends DataPoint {
                 options: {
                     id: this._offlineId,
                     key,
-                    createdId,
-                    expectedDraftKey: draft?.key,
+                    draftKey: this._offlineDraftKey,
+                    fallbackCreatedId: this.isNew ? offlineRecordId(key) : undefined,
+                    createArgs,
                     refs: reference.key ? [reference.key] : [],
-                    target: draft ? undefined : { model: this.resModel, ids: [createdId || this.resId] },
+                    target: this.isNew ? undefined : {
+                        model: this.resModel, ids: [reference.key ? this.resId : reference.value],
+                    },
                     extras: {
                         ...getScheduleORMExtras(this.model, [this]),
                         changes: this._formatOfflineValues(this._changes),
                         originalValues: this._formatOfflineValues(
                             pick(this._values, ...Object.keys(this._changes)), { changes: false }
                         ),
-                        overlayValues: this._offlineOverlayValues(creation ? this.data : this._changes),
-                        overlayBefore: creation ? undefined : this._offlineOverlayValues(this._values),
+                        overlayValues: this._offlineOverlayValues(this.isNew ? this.data : this._changes),
+                        overlayBefore: this.isNew ? undefined : this._offlineOverlayValues(this._values),
                     },
                 },
             },
             onSaved: (id) => {
                 this._offlineId = id;
-                if (createdId) {
-                    this.config.resId = createdId;
-                    this.config.resIds = [createdId];
+                const offline = this.model.offlinePlugin;
+                const entry = offline.getPendingEntries().find((item) => item.key === key);
+                if (entry?.createdId) {
+                    this.config.resId = entry.createdId;
+                    this.config.resIds = [entry.createdId];
+                } else if (this.isNew) {
+                    this._offlineDraftKey = offline.getPendingDraftCreate(this.resModel, id)?.key ?? this._offlineDraftKey;
                 }
                 this._commitSave();
             },

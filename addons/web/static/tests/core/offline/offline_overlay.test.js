@@ -12,11 +12,14 @@ import {
     mountView,
     mountWithCleanup,
     onRpc,
+    patchWithCleanup,
     webModels,
 } from "@web/../tests/web_test_helpers";
 import { isOfflineRecordId, offlineRecordId } from "@web/core/offline/offline_id";
 import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { registry } from "@web/core/registry";
+import { user } from "@web/core/user";
+import { Deferred } from "@web/core/utils/concurrency";
 import {
     getOfflineOverlay,
     overlayGroups,
@@ -185,7 +188,7 @@ test("monetary overlay updates converted totals and currencies when a card moves
         .toEqual([[20, 20, [1]], [80, 160, [2]]]);
 });
 
-async function mountOverlayView(type, template, resId) {
+async function mountOverlayView(type, template, resId, params) {
     let model;
     class OverlayModel extends RelationalModel {
         static offlineOverlay = true;
@@ -203,12 +206,22 @@ async function mountOverlayView(type, template, resId) {
         name = fields.Char();
         stage_id = fields.Many2one({ relation: "stage" });
         active = fields.Boolean({ default: true });
+        currency_id = fields.Many2one({ relation: "res.currency" });
+        revenue = fields.Monetary({ aggregator: "sum", currency_field: "currency_id" });
+        line_ids = fields.One2many({ relation: "lead.line", relation_field: "lead_id" });
         _records = [{ id: 1, name: "Saved lead", active: true }];
     }
-    defineModels([Lead, Stage, ...Object.values(webModels)]);
+    class LeadLine extends models.Model {
+        _name = "lead.line";
+        lead_id = fields.Many2one({ relation: "lead" });
+        description = fields.Char();
+        _records = [{ id: 21, lead_id: 1, description: "Cached child description" }];
+    }
+    defineModels([Lead, Stage, LeadLine, ...Object.values(webModels)]);
     await mountView({
         type, resModel: "lead", resId,
         arch: `<${type} js_class="testing_overlay_${type}">${template}</${type}>`,
+        ...params,
     });
     await getService(OfflinePlugin).getQueueReady();
     return model;
@@ -278,6 +291,84 @@ test("bulk archive and unlink target the create reference, not the local ID", as
         expect(entry.target.ids).toEqual([createdId, 1]);
         expect(entry.refs).toEqual([key]);
     }
+});
+
+test("bulk archive on a stale local row sends immediately and blocks later server-ID edits", async () => {
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        expect.step([params.method, params.args[0]]);
+        return new Response(JSON.stringify({ error: { code: 200, data: { name: "odoo.exceptions.AccessError" } } }));
+    });
+    const model = await mountOverlayView("list", `<field name="name"/><field name="active"/>`);
+    const offline = getService(OfflinePlugin);
+    const key = window.crypto.randomUUID();
+    const localId = offlineRecordId(key);
+    await offline._queue.recordResolution("lead", localId, key, 47);
+    model.root._setData({ records: [{ id: localId, name: "Stale row", active: true }], length: 1 });
+    model.root.records[0]._toggleSelection(true);
+    let sync;
+    patchWithCleanup(offline, {
+        syncPendingChanges() {
+            sync = super.syncPendingChanges();
+            return sync;
+        },
+    });
+    expect(await model.root._toggleArchive(true, true)).toBe(true);
+    await sync;
+    expect.verifySteps([["action_archive", [47]]]);
+    const [archive] = await offline._queue.list();
+    expect(archive.target.ids).toEqual([47]);
+    expect(archive.state).toBe("needs_attention");
+
+    await offline.scheduleORMDurably("lead", "web_save", [[47], { name: "Later" }], {});
+    await offline._syncORM();
+    expect.verifySteps([]);
+    expect((await offline._queue.list()).map(({ state }) => state)).toEqual(["needs_attention", "held_back"]);
+});
+
+test("opening an unrelated save preserves cached one2many child data", async () => {
+    const setOffline = mockOffline();
+    const model = await mountOverlayView("form", `<field name="name"/>
+        <field name="line_ids"><list><field name="description"/></list></field>`, 1);
+    const record = model.root;
+    expect(record.data.line_ids.records[0].data.description).toBe("Cached child description");
+    await setOffline(true);
+    record._applyChanges({ name: "Edited name" });
+    expect(await record._offlineSave()).toBe(true);
+    const [entry] = getService(OfflinePlugin).getPendingEntries();
+    await record.setOfflineChanges(entry.key);
+    expect(record.data.name).toBe("Edited name");
+    expect(record.data.line_ids.records[0].data.description).toBe("Cached child description");
+});
+
+test("a projected many2one group supplies data for the group header record", () => {
+    const stage = { id: 7, display_name: "Qualified" };
+    const localId = -17;
+    const overlay = getOfflineOverlay([queued(localId, { stage_id: stage }, { createdId: localId })], "crm.lead", {});
+    const { groups } = overlayGroups({ length: 0, groups: [] }, {
+        ...config, groupBy: ["stage_id"], fields: { ...config.fields, stage_id: { type: "many2one" } },
+    }, overlay);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].__values).toEqual(stage);
+});
+
+test("a grouped monetary view warms offline currency rates without blocking its load", async () => {
+    patchWithCleanup(user, {
+        get activeCompany() {
+            return { id: 1, currency_id: 1 };
+        },
+    });
+    const readStarted = new Deferred();
+    const rateResponse = new Deferred();
+    onRpc("/web/dataset/call_kw/res.currency/read", () => {
+        readStarted.resolve();
+        return rateResponse;
+    });
+    await mountOverlayView("list", `<field name="stage_id"/><field name="revenue" sum="Total"/>`,
+        undefined, { groupBy: ["stage_id"] });
+    await readStarted;
+    rateResponse.resolve([{ id: 2, inverse_rate: 0.5, rate_date: "2025-01-01" }]);
+    await animationFrame();
 });
 
 test("follow-up saves of an older durable draft keep referencing its original create", async () => {

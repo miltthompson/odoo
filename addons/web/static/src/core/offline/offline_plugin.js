@@ -64,6 +64,7 @@ export class OfflinePlugin extends Plugin {
     _writes = Promise.resolve();
     // A caller may already hold a reference to an entry whose local write failed.
     _failedWriteKeys = new Set();
+    _syncedDraftIds = new Map();
     _syncAgain = false;
     _visitedUITable = computed(() =>
         this.debugMode.isActive()
@@ -314,6 +315,12 @@ export class OfflinePlugin extends Plugin {
         return entry.legacyKey;
     }
 
+    /** Return the compatibility key only after this fallback action is safely queued. */
+    async scheduleORMDurably(model, method, args, kwargs, options) {
+        const keys = await this.scheduleORMBatch([{ model, method, args, kwargs, options }]);
+        return keys ? keys[0] : false;
+    }
+
     /** Persist individual calls together locally; no entries are shown if storage fails. */
     async scheduleORMBatch(calls) {
         if (!this._queue) {
@@ -324,6 +331,12 @@ export class OfflinePlugin extends Plugin {
         }
         let keys;
         await this._enqueueWrite(async () => {
+            if (calls.some(({ method, args, options }) =>
+                method === "web_save" && !args[0]?.length && options?.id !== undefined
+            )) {
+                // A different tab may have discarded the draft since our last read.
+                await this._refreshQueue();
+            }
             const entries = calls.map((call) => this._makeEntry(call));
             let saved;
             try {
@@ -399,12 +412,8 @@ export class OfflinePlugin extends Plugin {
         if (!isOfflineRecordId(id)) {
             return { value: id };
         }
-        const local = this.getRecordReference(model, id);
-        if (local) {
-            return local;
-        }
         const resolved = await this.resolveOfflineRecord(model, id);
-        return resolved && { value: resolved.id };
+        return resolved ? { value: resolved.id } : this.getRecordReference(model, id);
     }
 
     async waitForPendingWrite(key) {
@@ -611,6 +620,14 @@ export class OfflinePlugin extends Plugin {
             this._pending().some((earlier) => earlier.seq === null && entry.refs.includes(earlier.key));
     }
 
+    getSyncedDraftId(key) {
+        return this._syncedDraftIds.get(key);
+    }
+
+    syncPendingChanges() {
+        return this._syncORM(true);
+    }
+
     getPendingDraftCreate(model, legacyKey) {
         return this._pending().find((entry) => entry.model === model && entry.method === "web_save" &&
             String(entry.legacyKey) === String(legacyKey) && !entry.args[0]?.length);
@@ -623,10 +640,14 @@ export class OfflinePlugin extends Plugin {
             args[0].filter((id) => typeof id === "number" || typeof id === "string")) || [];
         // Before a pending create has a record ID, the legacy form reuses its UI key
         // when reopened. Keep that key, but send the next save as a separate write.
-        const create = !options.createdId && options.id !== undefined && method === "web_save" && !args[0]?.length &&
-            this.getPendingDraftCreate(model, legacyKey);
-        if (options.expectedDraftKey && create?.key !== options.expectedDraftKey) {
-            throw new Error("The offline draft is no longer pending");
+        const draftSave = !options.createdId && options.id !== undefined &&
+            method === "web_save" && !args[0]?.length;
+        const syncedId = draftSave && this.getSyncedDraftId(options.draftKey);
+        const create = draftSave && !syncedId && this.getPendingDraftCreate(model, legacyKey);
+        const createdId = options.createdId ?? (!create && !syncedId ? options.fallbackCreatedId : undefined);
+        if (syncedId) {
+            args = [[syncedId], ...args.slice(1)];
+            targetIds.push(syncedId);
         }
         return {
             ...this._owner,
@@ -634,12 +655,16 @@ export class OfflinePlugin extends Plugin {
             legacyKey,
             seq: null,
             model, method, kwargs, extras,
-            args: create ? [[`offline:${create.key}`], ...args.slice(1)] : options.createArgs ?? args,
+            args: create ? [[`offline:${create.key}`], ...args.slice(1)] :
+                syncedId ? args : options.createArgs ?? args,
             legacyArgs: create ? args : undefined,
             refs: create ? [create.key, ...(options.refs || [])] : options.refs || [],
-            target: options.target || { model, ids: create ? [`offline:${create.key}`] : targetIds },
+            target: options.target || {
+                model,
+                ids: create ? [`offline:${create.key}`] : createdId ? [createdId] : targetIds,
+            },
             steps: options.steps,
-            createdId: options.createdId,
+            createdId,
             label: options.label || extras?.displayName || "",
             acted_at: extras?.timeStamp ?? Date.now(),
             server_version: session.registry_hash,
@@ -792,6 +817,7 @@ export class OfflinePlugin extends Plugin {
                                 } else {
                                     // Keep the replay reference for ordering, but open the saved record.
                                     const updated = await this._queue.rememberDraftRecord(key, model, id);
+                                    this._syncedDraftIds.set(key, id);
                                     for (const edit of updated) {
                                         this._replaceEntry(edit);
                                     }

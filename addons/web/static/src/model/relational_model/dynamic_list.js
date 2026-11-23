@@ -289,7 +289,7 @@ export class DynamicList extends DataPoint {
             });
         } catch (e) {
             if (e instanceof ConnectionLostError) {
-                this.model.offlinePlugin.scheduleORM(
+                const key = await this.model.offlinePlugin.scheduleORMDurably(
                     this.resModel,
                     "web_unlink",
                     [resIds],
@@ -298,6 +298,9 @@ export class DynamicList extends DataPoint {
                         extras: getScheduleORMExtras(this.model, records),
                     }
                 );
+                if (key === false) {
+                    return false;
+                }
                 this._unselectAll();
                 return true;
             }
@@ -588,7 +591,7 @@ export class DynamicList extends DataPoint {
         } catch (e) {
             if (e instanceof ConnectionLostError) {
                 const records = this.records.filter((r) => resIds.includes(r.resId));
-                this.model.offlinePlugin.scheduleORM(
+                const key = await this.model.offlinePlugin.scheduleORMDurably(
                     this.resModel,
                     method,
                     [resIds],
@@ -597,6 +600,9 @@ export class DynamicList extends DataPoint {
                         extras: getScheduleORMExtras(this.model, records),
                     }
                 );
+                if (key === false) {
+                    return false;
+                }
                 this._unselectAll();
                 return true;
             }
@@ -641,12 +647,19 @@ export class DynamicList extends DataPoint {
             kwargs: { context: this.context },
             options: {
                 refs: unique(references.map(({ key }) => key).filter(Boolean)),
-                target: { model: this.resModel, ids: resIds },
+                target: {
+                    model: this.resModel,
+                    ids: references.map(({ key, value }, index) => key ? resIds[index] : value),
+                },
                 extras: getScheduleORMExtras(this.model, records),
             },
         }]);
         if (!keys) {
             return false;
+        }
+        // A stale list can still hold a local ID after replay has finished.
+        if (references.some(({ key }, index) => !key && isOfflineRecordId(resIds[index]))) {
+            offline.syncPendingChanges();
         }
         this._unselectAll();
         return true;

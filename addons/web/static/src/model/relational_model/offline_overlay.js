@@ -132,6 +132,10 @@ function makeLocalGroup(groupBy, value, config) {
         __extra_domain: [[groupBy, "=", key]],
         __count: 0,
     };
+    if (field.type === "many2one") {
+        // A list group header may instantiate a record for this relation.
+        group.__values = key ? { id: key, display_name: value.display_name } : {};
+    }
     for (const aggregate of getAggregateSpecifications(config.fields)) {
         group[aggregate] = aggregate.endsWith(":array_agg_distinct") ? [] : false;
     }
