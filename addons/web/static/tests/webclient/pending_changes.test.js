@@ -1,4 +1,5 @@
 import { animationFrame, expect, press, queryAllTexts, queryOne, runAllTimers, test, waitFor } from "@odoo/hoot";
+import { offlineRecordId } from "@web/core/offline/offline_id";
 import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { Record } from "@web/model/relational_model/record";
 import { WebClient } from "@web/webclient/webclient";
@@ -349,6 +350,44 @@ test("Open targets the saved record when a follow-up draft edit is rejected", as
     await contains(".o_offline_systray").click();
     await contains(".o_offline_pending_item button:contains(Open)").click();
     expect.verifySteps([[5, "form", 47, edit.key]]);
+});
+
+test("Open resolves a queued edit's local ID after its create syncs", async () => {
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        if (!params.refs.length) {
+            return [{ id: 47 }];
+        }
+        return new Response(JSON.stringify({ error: {
+            code: 200, data: { name: "odoo.exceptions.ValidationError", message: "Check the name." },
+        } }));
+    });
+    await mountWithCleanup(WebClient);
+    await runAllTimers();
+    const offline = getService(OfflinePlugin);
+    const key = window.crypto.randomUUID();
+    const createdId = offlineRecordId(key);
+    const extras = { actionId: 5, viewType: "form" };
+    const target = { model: "res.partner", ids: [createdId] };
+    offline.scheduleORM("res.partner", "web_save", [[], { name: "Draft" }], {}, {
+        key, createdId, extras, target,
+    });
+    offline.scheduleORM("res.partner", "web_save", [[`offline:${key}`], { name: "Renamed" }], {}, {
+        refs: [key], extras, target,
+    });
+    await offline._syncORM();
+    const [edit] = offline.getPendingEntries();
+    expect(edit.state).toBe("needs_attention");
+
+    patchWithCleanup(getService("action"), {
+        async doAction(action, options) {
+            expect.step([action, options.props.resId, options.props.offlineId]);
+        },
+    });
+    await contains(".o_offline_systray").click();
+    await contains(".o_offline_pending_item button:contains(Open)").click();
+    await animationFrame();
+    expect.verifySteps([[5, 47, edit.key]]);
 });
 
 test("a new edit to a synced draft waits behind a rejected edit to the same record", async () => {

@@ -150,15 +150,15 @@ export class OfflineQueueStore {
         }
     }
 
-    async rememberDraftRecord(key, model, id) {
+    async rememberDraftRecord(key, model, id, localId = `offline:${key}`) {
         const updates = (await this.list())
-            .filter((entry) => entry.model === model && entry.legacyArgs && entry.refs.includes(key))
+            .filter((entry) => entry.target.model === model && entry.refs.includes(key) && entry.target.ids.includes(localId))
             .map((entry) => ({
                 ...entry,
-                resolvedResId: id,
+                ...(entry.method === "web_save" && { resolvedResId: id }),
                 target: {
                     ...entry.target,
-                    ids: entry.target.ids.map((targetId) => targetId === `offline:${key}` ? id : targetId),
+                    ids: [...new Set(entry.target.ids.map((targetId) => targetId === localId ? id : targetId))],
                 },
             }));
         if (updates.length) {

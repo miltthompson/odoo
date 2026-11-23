@@ -491,7 +491,7 @@ export class KanbanRenderer extends Component {
         const record = await group.addExistingRecord(recordId, true);
         if (mode === "edit") {
             await this.props.openRecord(record);
-        } else {
+        } else if (recordId > 0) {
             this.props.progressBarState?.updateCounts(group);
         }
     }

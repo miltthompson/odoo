@@ -1,5 +1,6 @@
 import { Component, computed, signal, useEffect, usePlugin } from "@odoo/owl";
 import { registry } from "@web/core/registry";
+import { isOfflineRecordId } from "@web/core/offline/offline_id";
 import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { useBus, useService } from "@web/core/utils/hooks";
 import { Dropdown } from "@web/core/dropdown/dropdown";
@@ -239,8 +240,13 @@ class OfflineSystray extends Component {
         return sections;
     });
 
+    getRecordId(entry) {
+        const args = entry.legacyArgs || entry.args;
+        return entry.resolvedResId ?? (entry.legacyArgs ? args[0]?.[0] : entry.target?.ids?.[0] ?? args[0]?.[0]);
+    }
+
     isClickable(value) {
-        const resId = value.resolvedResId ?? (value.legacyArgs || value.args)[0]?.[0] ?? false;
+        const resId = this.getRecordId(value) || false;
         const draft = value.legacyArgs && !value.resolvedResId &&
             this.offlinePlugin.getPendingDraftCreate(value.model, value.legacyKey);
         return (
@@ -319,11 +325,24 @@ class OfflineSystray extends Component {
     }
 
     async openView(entry, exact = false) {
-        this.dropdown.close();
         if (!this.isClickable(entry)) {
             return;
         }
-        const resId = entry.resolvedResId ?? (entry.legacyArgs || entry.args)[0]?.[0];
+        let resId = this.getRecordId(entry);
+        // Preserve the original row activation when the blank form is cached. The
+        // explicit Open button can open an offline ID directly without that cache.
+        if (!exact && entry.createdId === resId && isOfflineRecordId(resId) &&
+            this.offlinePlugin.isAvailableOffline(entry.extras.actionId, "form", false)) {
+            resId = undefined;
+        }
+        if (isOfflineRecordId(resId) && !this.offlinePlugin.getRecordReference(entry.model, resId)) {
+            const resolved = await this.offlinePlugin.resolveOfflineRecord(entry.model, resId);
+            if (!resolved) {
+                return;
+            }
+            resId = resolved.id;
+        }
+        this.dropdown.close();
         const siblings = this.offlinePlugin.getPendingEntries().filter((item) => item.legacyKey === entry.legacyKey);
         await this.actionService.doAction(entry.extras.actionId, {
             viewType: "form",

@@ -15,6 +15,7 @@ import { _t } from "@web/core/l10n/translation";
 import { normalize } from "@web/core/l10n/utils";
 import { ConnectionLostError, RPCError, rpc, rpcBus } from "@web/core/network/rpc";
 import { OfflineQueueStore, RESOLUTION_TTL, clearLegacyReadStores, offlineDatabaseName } from "./offline_storage";
+import { isOfflineRecordId, offlineRecordRef } from "./offline_id";
 import { user } from "@web/core/user";
 import { registry } from "@web/core/registry";
 import { services } from "@web/core/services";
@@ -149,6 +150,7 @@ export class OfflinePlugin extends Plugin {
             return;
         }
         this.isOffline.set(offline);
+        rpcBus.trigger("OFFLINE:STATUS_CHANGED", { offline });
         this._visited.set({});
         if (offline) {
             // Disable everything in the UI that isn't marked as available offline.
@@ -239,6 +241,9 @@ export class OfflinePlugin extends Plugin {
      * @returns boolean
      */
     isAvailableOffline(actionId, viewType, resId) {
+        if (viewType === "form" && isOfflineRecordId(resId)) {
+            return this._pending().some((entry) => entry.createdId === resId && entry.extras?.actionId === actionId);
+        }
         const action = this._visited()[actionId];
         if (!viewType) {
             return !!action;
@@ -298,7 +303,8 @@ export class OfflinePlugin extends Plugin {
                 if (this._hasUnsavedDependency(entry)) {
                     throw new Error("An earlier offline change has not been saved");
                 }
-                this._replaceEntry(await this._queue.add(entry));
+                const target = await this._resolveQueueTarget(entry.target);
+                this._replaceEntry(await this._queue.add({ ...entry, target }));
                 this._failedWriteKeys.delete(entry.key);
             } catch (error) {
                 this._failedWriteKeys.add(entry.key);
@@ -326,7 +332,7 @@ export class OfflinePlugin extends Plugin {
         let keys;
         await this._enqueueWrite(async () => {
             if (calls.some(({ method, args, options }) =>
-                method === "web_save" && !args[0]?.length && options?.id !== undefined
+                method === "web_save" && (options?.draftCreate || (!args[0]?.length && options?.id !== undefined))
             )) {
                 // Another tab may have discarded or synced the draft since our last read.
                 await this._refreshQueue();
@@ -334,7 +340,7 @@ export class OfflinePlugin extends Plugin {
             const recoveries = new Map();
             const changes = await Promise.all(calls.map(async (call) => {
                 const original = call.options?.draftCreate;
-                const draft = original && !call.args[0]?.length &&
+                const draft = original && (!call.args[0]?.length || call.args[0]?.[0] === offlineRecordRef(original.key)) &&
                     await this._getDraftSaveState(call.model, original);
                 const recovery = draft?.recover;
                 if (recovery) {
@@ -346,9 +352,10 @@ export class OfflinePlugin extends Plugin {
                         draftSent: true, draftRejected: false, draftRollbackConfirmed: undefined,
                     });
                 }
+                const target = await this._resolveQueueTarget(call.options?.target);
                 return this._makeEntry({
                     ...call,
-                    options: { ...call.options, recoveryCreate: recovery ? original : undefined,
+                    options: { ...call.options, target, recoveryCreate: recovery ? original : undefined,
                         resolvedDraftId: draft?.resId },
                 });
             }));
@@ -376,6 +383,16 @@ export class OfflinePlugin extends Plugin {
             keys = saved.slice(recoveries.size).map((entry) => entry.legacyKey);
         });
         return keys;
+    }
+
+    async _resolveQueueTarget(target) {
+        if (!target?.ids.some(isOfflineRecordId)) {
+            return target;
+        }
+        // A create may have replayed between reference lookup and acquiring the queue lock.
+        const ids = await Promise.all(target.ids.map(async (id) => isOfflineRecordId(id)
+            ? (await this._queue.resolveRecord(target.model, id))?.id ?? id : id));
+        return { ...target, ids: [...new Set(ids)] };
     }
 
     /** Queue all steps as one change. `target` is the record affected by the whole operation. */
@@ -411,6 +428,28 @@ export class OfflinePlugin extends Plugin {
 
     getPendingEntry(legacyKey) {
         return this._pending().findLast((entry) => String(entry.legacyKey) === String(legacyKey));
+    }
+
+    /** Reference an offline create in replay args/kwargs without passing a local ID to the ORM. */
+    getRecordReference(model, id) {
+        const create = this.getPendingLocalCreate(model, id);
+        return create && { value: offlineRecordRef(create.key), key: create.key };
+    }
+
+    getPendingLocalCreate(model, id) {
+        return this._pending().find((entry) => entry.model === model && entry.createdId === id);
+    }
+
+    resolveOfflineRecord(model, id) {
+        return this._queue?.resolveRecord(model, id);
+    }
+
+    async getReplayRecordReference(model, id) {
+        if (!isOfflineRecordId(id)) {
+            return { value: id };
+        }
+        const resolved = await this.resolveOfflineRecord(model, id);
+        return resolved ? { value: resolved.id } : this.getRecordReference(model, id);
     }
 
     async waitForPendingWrite(key) {
@@ -642,8 +681,8 @@ export class OfflinePlugin extends Plugin {
     }
 
     // Both callers hold the queue lock and have refreshed the pending entries.
-    async _getDraftSaveState(model, { key, queued_at, acted_at, resId: knownId }) {
-        const resolution = key && await this._queue.resolveRecord(model, key);
+    async _getDraftSaveState(model, { key, createdId, queued_at, acted_at, resId: knownId }) {
+        const resolution = key && await this._queue.resolveRecord(model, createdId ?? key);
         const entries = this._pending().filter((entry) => entry.model === model);
         const resId = knownId ?? resolution?.id ?? entries.find((entry) =>
             entry.resolvedResId && entry.args[0]?.[0] === `offline:${key}`
@@ -674,10 +713,13 @@ export class OfflinePlugin extends Plugin {
             args[0].filter((id) => typeof id === "number" || typeof id === "string")) || [];
         // Before a pending create has a record ID, the legacy form reuses its UI key
         // when reopened. Keep that key, but send the next save as a separate write.
-        const draftSave = options.id !== undefined && method === "web_save" && !args[0]?.length;
+        const draftSave = !options.createdId && options.id !== undefined &&
+            method === "web_save" && !args[0]?.length;
         const syncedId = draftSave && options.resolvedDraftId;
         const create = draftSave && !syncedId &&
             (options.recoveryCreate || this.getPendingDraftCreate(model, legacyKey));
+        const createdId = options.createdId ?? (!create && !syncedId && !options.manualRecovery
+            ? options.fallbackCreatedId : undefined);
         if (syncedId) {
             args = [[syncedId], ...args.slice(1)];
             targetIds.push(syncedId);
@@ -692,8 +734,12 @@ export class OfflinePlugin extends Plugin {
                 syncedId ? args : options.createArgs ?? args,
             legacyArgs: create ? args : undefined,
             refs: create ? [create.key, ...(options.refs || [])] : options.refs || [],
-            target: options.target || { model, ids: create ? [`offline:${create.key}`] : targetIds },
+            target: options.target || {
+                model,
+                ids: create ? [`offline:${create.key}`] : createdId ? [createdId] : targetIds,
+            },
             steps: options.steps,
+            createdId,
             label: options.label || extras?.displayName || "",
             acted_at: extras?.timeStamp ?? queued_at,
             queued_at,
@@ -860,12 +906,13 @@ export class OfflinePlugin extends Plugin {
                         continue;
                     }
                     await this._queue.lock(async () => {
-                        if (method === "web_save" && !args[0]?.length) {
-                            const id = result?.already_applied ? result.created_ids[0] : result?.[0]?.id;
+                        if (entry.createdId || (method === "web_save" && !args[0]?.length)) {
+                            const created = Array.isArray(result) ? result[0] : result;
+                            const id = result?.already_applied ? result.created_ids[0] : created?.id ?? created;
                             if (Number.isSafeInteger(id) && id > 0) {
                                 // Persist before removing the create so other tabs distinguish it from a discard.
-                                await this._queue.recordResolution(model, key, key, id);
-                                const updated = await this._queue.rememberDraftRecord(key, model, id);
+                                await this._queue.recordResolution(model, entry.createdId ?? key, key, id);
+                                const updated = await this._queue.rememberDraftRecord(key, model, id, entry.createdId);
                                 for (const edit of updated) {
                                     this._replaceEntry(edit);
                                 }

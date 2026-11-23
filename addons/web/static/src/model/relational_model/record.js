@@ -2,6 +2,7 @@ import { markRaw, markup, toRaw } from "@odoo/owl";
 import { serializeDate, serializeDateTime } from "@web/core/l10n/dates";
 import { _t } from "@web/core/l10n/translation";
 import { ConnectionLostError, RPCError } from "@web/core/network/rpc";
+import { isOfflineRecordId, offlineRecordId, offlineRecordRef } from "@web/core/offline/offline_id";
 import { x2ManyCommands } from "@web/core/orm_plugin";
 import { evaluateBooleanExpr } from "@web/core/py_js/py";
 import { pick } from "@web/core/utils/objects";
@@ -94,6 +95,9 @@ export class Record extends DataPoint {
         // be false or a string). This allows us to properly build the eval context, and to always
         // expose string values (false fallbacks on the empty string) in this.data.
         this._textValues = markRaw({});
+        if (isOfflineRecordId(this.resId)) {
+            this._offlineDraft = this.model.offlinePlugin.getPendingLocalCreate(this.resModel, this.resId);
+        }
         this._setData(data);
     }
 
@@ -101,9 +105,21 @@ export class Record extends DataPoint {
      * @param {RecordType<string, unknown>} data
      * @param {FieldSpecifications} [params]
      */
-    _setData(data, { orderBys, keepChanges } = {}) {
+    _setData(data, { orderBys, keepChanges, fromOfflineEntry } = {}) {
         this._isEvalContextReady = false;
-        if (this.resId) {
+        if (fromOfflineEntry) {
+            // Reuse hydrated children when the saved snapshot only knows their IDs and labels.
+            const currentValues = {};
+            for (const [name, value] of Object.entries(data)) {
+                const ids = this.data[name]?.currentIds;
+                if (ids && Array.isArray(value) && ids.length === value.length &&
+                    ids.every((id, index) => id === (value[index]?.id ?? value[index]))) {
+                    currentValues[name] = this.data[name];
+                }
+            }
+            this._values = markRaw({ ...this.data, ...this._parseServerValues(data, { currentValues }) });
+            Object.assign(this._textValues, this._getTextValues(data));
+        } else if (this.resId && !isOfflineRecordId(this.resId)) {
             this._values = this._parseServerValues(data, { orderBys });
             Object.assign(this._textValues, this._getTextValues(data));
         } else {
@@ -162,7 +178,7 @@ export class Record extends DataPoint {
     }
 
     get hasOfflineDraft() {
-        return Boolean(this._offlineDraft || (this.isNew && this._offlineId));
+        return Boolean(this._offlineDraft || isOfflineRecordId(this.resId) || (this.isNew && this._offlineId));
     }
 
     get isValid() {
@@ -200,20 +216,15 @@ export class Record extends DataPoint {
         return this.model.mutex.exec(async () => {
             let unlinked = false;
             try {
+                if (isOfflineRecordId(this.resId)) {
+                    return this._queueOfflineRecordCall("web_unlink");
+                }
                 unlinked = await this.model.orm.webUnlink(this.resModel, [this.resId], {
                     context: this.context,
                 });
             } catch (e) {
                 if (e instanceof ConnectionLostError) {
-                    return this.model.offlinePlugin.scheduleORMDurably(
-                        this.resModel,
-                        "web_unlink",
-                        [[this.resId]],
-                        { context: this.context },
-                        {
-                            extras: getScheduleORMExtras(this.model, [this]),
-                        }
-                    );
+                    return this._queueOfflineRecordCall("web_unlink");
                 }
                 throw e;
             }
@@ -391,9 +402,14 @@ export class Record extends DataPoint {
     }
 
     setOfflineChanges(id) {
+        if (isOfflineRecordId(this.resId) && !id) {
+            return;
+        }
         let scheduledORM;
+        let entry;
+        let exactEntry;
         if (id) {
-            const entry = this.model.offlinePlugin.getPendingEntries().find((item) => item.key === id);
+            exactEntry = entry = this.model.offlinePlugin.getPendingEntries().find((item) => item.key === id);
             scheduledORM = entry
                 ? { key: entry.legacyKey, value: entry }
                 : this.model.offlinePlugin._ormToSync()[id];
@@ -408,7 +424,13 @@ export class Record extends DataPoint {
         }
         if (scheduledORM && !scheduledORM.value.manualRecovery) {
             this._offlineId = scheduledORM.key;
-            if (this.isNew) {
+            entry ||= this.model.offlinePlugin.getPendingEntry(scheduledORM.key);
+            if (entry?.createdId) {
+                this._offlineDraft = entry;
+                // A compatibility link can still open the cached blank form.
+                this.config.resId = entry.createdId;
+                this.config.resIds = [entry.createdId];
+            } else if (this.isNew) {
                 this._trackOfflineDraft(this._offlineId);
             } else if (scheduledORM.value.method === "web_save" &&
                 scheduledORM.value.model === this.resModel &&
@@ -416,15 +438,20 @@ export class Record extends DataPoint {
                 // Edits using the server ID still need to wait behind older queued changes.
                 this._queuedDraftResId = this.resId;
             }
-            this._offlineChanges = markRaw(
-                this._parseOfflineValues(scheduledORM.value.extras.changes)
-            );
-            this._offlineTimeStamp = scheduledORM.value.extras.timeStamp;
-            return this.model.mutex.exec(async () => {
-                await this._update(this._offlineChanges);
-                // Reopening a queued change loads saved data; it is not another edit.
-                this._commitSave();
-            });
+            if (exactEntry?.extras?.overlayValues &&
+                (this.model.shouldApplyOfflineOverlay || isOfflineRecordId(this.resId))) {
+                const { overlayBefore, overlayValues } = exactEntry.extras;
+                this._setData({ ...overlayBefore, ...overlayValues, id: this.resId }, { fromOfflineEntry: true });
+            } else if (entry?.createdId) {
+                const change = this.model.getOfflineOverlay(this.config, this.resId).get(this.resId);
+                this._setData({ ...this._getDefaultValues(), ...change?.patch, id: this.resId });
+            } else if (!this.model.shouldApplyOfflineOverlay || !entry?.extras?.overlayValues) {
+                return this.model.mutex.exec(async () => {
+                    await this._update(this._parseOfflineValues(scheduledORM.value.extras.changes));
+                    // Reopening a queued change loads saved data; it is not another edit.
+                    this._commitSave();
+                });
+            }
         }
     }
 
@@ -1262,7 +1289,8 @@ export class Record extends DataPoint {
     }
 
     _adoptSyncedDraft(resId) {
-        const resIds = [...new Set([...this.resIds, resId])];
+        const previousId = this.resId;
+        const resIds = [...new Set([...this.resIds.map((id) => id === previousId ? resId : id), resId])];
         this.model._updateConfig(this.config, { resId, resIds }, { reload: false });
     }
 
@@ -1286,12 +1314,13 @@ export class Record extends DataPoint {
                 if (!state) {
                     return false;
                 }
+                const isLocal = !this.resId || isOfflineRecordId(this.resId);
                 if (state.resId && !this.resId) {
                     this._adoptSyncedDraft(state.resId);
                 }
-                recoveringDraft = state.recover && !this.resId;
+                recoveringDraft = state.recover && isLocal;
                 pendingDraft = state.pending || recoveringDraft;
-                replayedDraft = Boolean(this._offlineDraft && this.resId);
+                replayedDraft = Boolean(this._offlineDraft && this.resId) && !isOfflineRecordId(this.resId);
                 if (!pendingDraft) {
                     this._queuedDraftResId = undefined;
                 }
@@ -1328,13 +1357,14 @@ export class Record extends DataPoint {
             return true;
         }
         if (urgent) {
-            // There is not enough time to persist queued changes during page unload.
-            if (pendingDraft || offline.isOffline()) {
+            // There isn't time to persist offline changes during page unload.
+            const localRecord = pendingDraft || isOfflineRecordId(this.resId);
+            if (localRecord || offline.isOffline()) {
+                const icons = { uploadIcon: markup`<i class="oi oi-fw" data-icon="cloud_upload"></i>` };
                 this.model._closeUrgentSaveNotification = this.model.notification.add(
-                    _t(
-                        `Heads up! Your recent changes cannot be saved automatically while you are offline. Please click the %(uploadIcon)s button now to ensure your work is saved before you exit this tab.`,
-                        { uploadIcon: markup`<i class="oi oi-fw" data-icon="cloud_upload"></i>` }
-                    ),
+                    localRecord
+                        ? _t("Heads up! Changes to this offline record cannot be saved automatically before you exit this tab. Please click the %(uploadIcon)s button now to save them.", icons)
+                        : _t("Heads up! Your recent changes cannot be saved automatically while you are offline. Please click the %(uploadIcon)s button now to ensure your work is saved before you exit this tab.", icons),
                     { sticky: true }
                 );
                 return false;
@@ -1414,6 +1444,13 @@ export class Record extends DataPoint {
             specification: fieldSpec,
             next_id: nextId,
         };
+        if (isOfflineRecordId(this.resId)) {
+            const saved = await this._offlineSave();
+            if (saved) {
+                offline.syncPendingChanges();
+            }
+            return saved;
+        }
         let records = [];
         try {
             records = await this.model.orm.webSave(
@@ -1555,8 +1592,56 @@ export class Record extends DataPoint {
         this.dirty = false;
     }
 
+    _offlineOverlayValues(values) {
+        const result = {};
+        for (const [name, value] of Object.entries(values)) {
+            const field = this.fields[name];
+            if (!field || name === "id") {
+                continue;
+            }
+            if (["many2many", "one2many"].includes(field.type)) {
+                result[name] = value?._currentIds.map((id) => ({ id, display_name: value._cache[id]?.display_name })) || [];
+            } else if (field.type === "many2one") {
+                result[name] = value ? { ...value } : false;
+            } else {
+                result[name] = this._formatServerValue(field.type, value);
+            }
+        }
+        return result;
+    }
+
+    _offlineReference() {
+        return this.model.offlinePlugin.getReplayRecordReference(this.resModel, this.resId);
+    }
+
+    async _queueOfflineRecordCall(method) {
+        const reference = await this._offlineReference();
+        if (!reference) {
+            return false;
+        }
+        const keys = await this.model.offlinePlugin.scheduleORMBatch([{
+            model: this.resModel,
+            method,
+            args: [[reference.value]],
+            kwargs: { context: this.context },
+            options: {
+                refs: reference.key ? [reference.key] : [],
+                target: { model: this.resModel, ids: [reference.key ? this.resId : reference.value] },
+                extras: {
+                    ...getScheduleORMExtras(this.model, [this]),
+                    overlayBefore: this._offlineOverlayValues(this._values),
+                },
+            },
+        }]);
+        return Boolean(keys);
+    }
+
     async _offlineSave(recoveryReason) {
-        const { call, onSaved } = this._prepareOfflineSave(recoveryReason);
+        const save = await this._prepareOfflineSave(recoveryReason);
+        if (!save) {
+            return false;
+        }
+        const { call, onSaved } = save;
         const keys = await this.model.offlinePlugin.scheduleORMBatch([call]);
         if (!keys) {
             return false;
@@ -1579,45 +1664,69 @@ export class Record extends DataPoint {
         return values;
     }
 
-    _prepareOfflineSave(recoveryReason) {
-        const offlineChanges = markRaw({ ...(this._offlineChanges || {}), ...this._changes });
+    async _prepareOfflineSave(recoveryReason) {
+        let reference = await this._offlineReference();
+        if (!reference && this._offlineDraft) {
+            const state = await this.model.offlinePlugin.getDraftSaveState(this.resModel, this._offlineDraft);
+            if (state?.resId) {
+                reference = { value: state.resId };
+            } else if (state?.recover || state?.pending) {
+                const { key } = this._offlineDraft;
+                reference = { key, value: offlineRecordRef(key) };
+            } else {
+                // A recently discarded temporary record must not be recreated on Save.
+                return;
+            }
+        }
+        if (!reference) {
+            recoveryReason = _t("The original draft could not be found. Check whether the record was sent before recreating it.");
+            reference = { value: this.resId };
+        }
+        const key = window.crypto.randomUUID();
         const editingDraft = this.isNew && this._offlineId;
         const changes = this._getChanges(this._changes, { isNew: this.isNew && !editingDraft });
         const createArgs = editingDraft ? [[], this._restoreDraftTags(this._getChanges())] : undefined;
-        const timeStamp = this._offlineTimeStamp || Date.now();
         const manualRecovery = recoveryReason || this._getDraftRecoveryReason(changes);
         return {
             call: {
                 model: this.resModel,
                 method: "web_save",
-                args: [this.resId ? [this.resId] : [], changes],
+                args: [this.isNew ? [] : [reference.value], changes],
                 kwargs: { context: this.context, specification: {} },
                 options: {
                     id: this._offlineId,
+                    key,
                     draftCreate: this._offlineDraft,
                     manualRecovery,
-                    // The queue checks for the original create under its lock. If it was
-                    // discarded, a new create must carry all values, not just this edit.
+                    fallbackCreatedId: this.isNew ? offlineRecordId(key) : undefined,
                     createArgs,
+                    refs: reference.key ? [reference.key] : [],
+                    target: this.isNew ? undefined : {
+                        model: this.resModel, ids: [reference.key ? this.resId : reference.value],
+                    },
                     extras: {
                         ...getScheduleORMExtras(this.model, [this]),
-                        changes: this._formatOfflineValues(offlineChanges),
+                        changes: this._formatOfflineValues(this._changes),
                         originalValues: this._formatOfflineValues(
-                            pick(this._values, ...Object.keys(offlineChanges)),
-                            { changes: false }
+                            pick(this._values, ...Object.keys(this._changes)), { changes: false }
                         ),
-                        timeStamp,
+                        overlayValues: this._offlineOverlayValues(this.isNew ? this.data : this._changes),
+                        overlayBefore: this.isNew ? undefined : this._offlineOverlayValues(this._values),
                         ...(manualRecovery && { recoveryLineTargets: this._getRecoveryLineTargets(changes) }),
                     },
                 },
             },
             onSaved: (id) => {
                 this._offlineId = id;
-                if (this.isNew) {
+                const offline = this.model.offlinePlugin;
+                const entry = offline.getPendingEntries().find((item) => item.key === key);
+                if (entry?.createdId) {
+                    this._offlineDraft = entry;
+                    this.config.resId = entry.createdId;
+                    this.config.resIds = [entry.createdId];
+                } else if (this.isNew) {
                     this._trackOfflineDraft(id);
                 }
-                this._offlineTimeStamp = timeStamp;
-                this._offlineChanges = offlineChanges;
                 this._commitSave();
             },
         };
@@ -1683,6 +1792,9 @@ export class Record extends DataPoint {
      */
     async _toggleArchive(state) {
         const method = state ? "action_archive" : "action_unarchive";
+        if (isOfflineRecordId(this.resId)) {
+            return this._queueOfflineRecordCall(method);
+        }
         let action;
         try {
             action = await this.model.orm.call(this.resModel, method, [[this.resId]], {
@@ -1690,15 +1802,7 @@ export class Record extends DataPoint {
             });
         } catch (e) {
             if (e instanceof ConnectionLostError) {
-                return this.model.offlinePlugin.scheduleORMDurably(
-                    this.resModel,
-                    method,
-                    [[this.resId]],
-                    { context: this.context },
-                    {
-                        extras: getScheduleORMExtras(this.model, [this]),
-                    }
-                );
+                return this._queueOfflineRecordCall(method);
             }
             throw e;
         }
