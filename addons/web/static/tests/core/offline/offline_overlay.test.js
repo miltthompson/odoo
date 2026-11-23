@@ -418,6 +418,36 @@ test("saving an open local record after its receipt expires reuses the original 
     expect(await offline._queue.list()).toEqual([]);
 });
 
+test("a temporary parent keeps line edits out of replay and preserves them for reapplication", async () => {
+    const setOffline = mockOffline();
+    const model = await mountOverlayView("form", `<field name="name"/>
+        <field name="line_ids"><list editable="bottom"><field name="description"/></list></field>`);
+    const record = model.root;
+    const offline = getService(OfflinePlugin);
+    const sent = [];
+    onRpc("/web/offline/sync", async (request) => {
+        sent.push((await request.json()).params);
+        return [{ id: 1 }];
+    });
+    await record.update({ name: "Draft", line_ids: [[0, 0, { description: "Initial line" }]] });
+    expect(await record._offlineSave()).toBe(true);
+    expect(isOfflineRecordId(record.resId)).toBe(true);
+    await animationFrame();
+    expect(".o_field_x2many_list_row_add button").toHaveCount(0);
+    const [line] = record.data.line_ids.records;
+    await line.update({ description: "Retained edit" });
+    await setOffline(true);
+    expect(await record.save()).toBe(true);
+    const [create, change] = await offline._queue.list();
+    expect(change.refs).toEqual([create.key]);
+    expect(change.state).toBe("needs_attention");
+    expect(change.args[1].line_ids).toEqual([[1, line._virtualId, { description: "Retained edit" }]]);
+    await setOffline(false);
+    await offline.syncPendingChanges();
+    expect(sent.map(({ key }) => key)).toEqual([create.key]);
+    expect((await offline._queue.get(change.key)).target.ids).toEqual([1]);
+});
+
 test("opening an unrelated save preserves cached one2many child data", async () => {
     const setOffline = mockOffline();
     const model = await mountOverlayView("form", `<field name="name"/>
