@@ -431,6 +431,12 @@ export class Record extends DataPoint {
             for (const fieldName of invalidFields) {
                 this.setInvalidField(fieldName);
             }
+            // An edit can add a field that wasn't loaded by the view.
+            for (const fieldName of Object.keys(this.data)) {
+                if (!Object.hasOwn(initialData, fieldName)) {
+                    delete this.data[fieldName];
+                }
+            }
             Object.assign(this.data, initialData);
             this._changes = markRaw(initialChanges);
             Object.assign(this._textValues, initialTextValues);
@@ -1404,7 +1410,8 @@ export class Record extends DataPoint {
 
     _prepareOfflineSave() {
         const offlineChanges = markRaw({ ...(this._offlineChanges || {}), ...this._changes });
-        const changes = this._getChanges(this._changes, { isNew: this.isNew && !this._offlineId });
+        const editingDraft = this.isNew && this._offlineId;
+        const changes = this._getChanges(this._changes, { isNew: this.isNew && !editingDraft });
         const timeStamp = this._offlineTimeStamp || Date.now();
         return {
             call: {
@@ -1414,10 +1421,9 @@ export class Record extends DataPoint {
                 kwargs: { context: this.context, specification: {} },
                 options: {
                     id: this._offlineId,
-                    // The draft may have been discarded while its form was still open.
-                    draftCreateValues: this.isNew && this._offlineId
-                        ? this._getChanges(this._changes, { isNew: true })
-                        : undefined,
+                    // The queue checks for the original create under its lock. If it was
+                    // discarded, a new create must carry all values, not just this edit.
+                    createArgs: editingDraft ? [[], this._getChanges()] : undefined,
                     extras: {
                         ...getScheduleORMExtras(this.model, [this]),
                         changes: this._formatOfflineValues(offlineChanges),

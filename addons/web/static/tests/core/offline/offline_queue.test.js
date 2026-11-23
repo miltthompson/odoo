@@ -1,7 +1,8 @@
-import { expect, test } from "@odoo/hoot";
+import { animationFrame, expect, queryAllTexts, test } from "@odoo/hoot";
 import { makeErrorFromResponse } from "@web/core/network/rpc";
 import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { OfflineQueueStore } from "@web/core/offline/offline_storage";
+import { DynamicGroupList } from "@web/model/relational_model/dynamic_group_list";
 import { DynamicList } from "@web/model/relational_model/dynamic_list";
 import {
     contains, defineModels, fields, getService, makeTestApp, mockOffline, models, mountView,
@@ -105,7 +106,7 @@ test("failed draft saves do not leave a create behind and follow-up saves only s
     expect(edit.args).toEqual([[`offline:${create.key}`], { name: "Updated draft" }]);
 });
 
-test("saving an open draft after discarding its create keeps all form values", async () => {
+test("saving after discarding an open draft queues a new create with all form values", async () => {
     class Lead extends models.Model {
         name = fields.Char();
         email = fields.Char();
@@ -118,40 +119,45 @@ test("saving an open draft after discarding its create keeps all form values", a
     });
     const offline = getService(OfflinePlugin);
     await setOffline(true);
-    await contains(".o_field_widget[name='name'] input").edit("Draft");
+    await contains(".o_field_widget[name='name'] input").edit("Initial draft");
     await contains(".o_field_widget[name='email'] input").edit("contact@example.com");
     await contains(".o_form_button_save").click();
-    const [discarded] = offline.getPendingEntries();
-    await offline.discardPendingChange(discarded.key);
-    await contains(".o_field_widget[name='name'] input").edit("New draft");
+    const [first] = offline.getPendingEntries();
+    await offline.discardPendingChange(first.key);
+
+    await contains(".o_field_widget[name='name'] input").edit("Saved again");
     await contains(".o_form_button_save").click();
-    const [create] = await offline._queue.list();
-    expect(create.key).not.toBe(discarded.key);
-    expect(create.args).toEqual([[], { name: "New draft", email: "contact@example.com" }]);
+    const [entry] = await offline._queue.list();
+    expect(entry.key).not.toBe(first.key);
+    expect(entry.refs).toEqual([]);
+    expect(entry.args).toEqual([[], { name: "Saved again", email: "contact@example.com" }]);
 });
 
-test("queue rejection propagates to callers scheduling dependent changes", async () => {
+test("local storage rejects chains referencing a failed queue write", async () => {
     await makeTestApp();
     const offline = getService(OfflinePlugin);
-    const [first, second, third] = Array.from({ length: 3 }, () => crypto.randomUUID());
-    patchWithCleanup(offline._queue, {
-        async add(entry) {
-            if (entry.key === first) {
+    let fail = true;
+    patchWithCleanup(offline._queue.db, {
+        async write(table, ...args) {
+            if (fail && table === "entries") {
+                fail = false;
                 throw new Error("Storage is full");
             }
-            return super.add(entry);
+            return super.write(table, ...args);
         },
     });
-    offline.scheduleORM("res.partner", "create", [{ name: "First" }], {}, { key: first });
-    offline.scheduleORM("res.partner", "create", [{ parent_id: `offline:${first}` }], {}, {
-        key: second, refs: [first],
-    });
-    offline.scheduleORM("res.partner", "write", [[`offline:${second}`], { name: "Third" }], {}, {
-        key: third, refs: [second],
-    });
-    expect(await offline.waitForPendingWrite(third)).toBe(false);
-    expect(offline.getPendingEntries().map(({ key }) => key)).toEqual([first]);
-    expect(await offline._queue.list()).toEqual([]);
+    const keys = Array.from({ length: 4 }, () => window.crypto.randomUUID());
+    const [first, second, third, independent] = keys;
+    const schedule = (key, refs) =>
+        offline.scheduleORM("res.partner", "create", [{ name: key }], {}, { key, refs });
+    schedule(first, []);
+    schedule(second, [first]);
+    schedule(third, [second]);
+    schedule(independent, []);
+    const saved = await Promise.all(keys.map((key) => offline.waitForPendingWrite(key)));
+    expect(saved).toEqual([false, false, false, true]);
+    expect((await offline._queue.list()).map(({ key }) => key)).toEqual([independent]);
+    expect(offline.getPendingEntries().map(({ key }) => key)).toEqual([independent]);
 });
 
 test("ordered changes to the same draft remain blocked after its create succeeds", async () => {
@@ -173,33 +179,60 @@ test("ordered changes to the same draft remain blocked after its create succeeds
     expect(offline.getPendingEntries().map(({ state }) => state)).toEqual(["needs_attention", "held_back"]);
 });
 
-test("a bulk edit does not publish any entries if its durable batch fails", async () => {
-    await makeTestApp();
+test("a failed offline bulk move restores the groups and the records' field values", async () => {
+    class Lead extends models.Model {
+        name = fields.Char();
+        stage = fields.Selection({ selection: [["new", "New"], ["won", "Won"]] });
+        _records = [
+            { id: 1, name: "Alpha", stage: "new" },
+            { id: 2, name: "Beta", stage: "new" },
+            { id: 3, name: "Gamma", stage: "won" },
+        ];
+    }
+    defineModels([Lead, ...Object.values(webModels)]);
+    let groupList;
+    patchWithCleanup(DynamicGroupList.prototype, {
+        setup() {
+            super.setup(...arguments);
+            groupList = this;
+        },
+    });
+    const setOffline = mockOffline();
+    await mountView({
+        type: "kanban", resModel: "lead", groupBy: ["stage"],
+        arch: `<kanban><templates><t t-name="card"><field name="name"/></t></templates></kanban>`,
+    });
     const offline = getService(OfflinePlugin);
+    const source = groupList.groups.find(({ value }) => value === "new");
+    const target = groupList.groups.find(({ value }) => value === "won");
+    const initialCards = groupList.groups.map((_, index) =>
+        queryAllTexts(`.o_kanban_group:eq(${index}) .o_kanban_record`)
+    );
+    // The column is grouped by stage, but the card did not load that field.
+    const initialStages = source.records.map(({ data }) => data.stage);
+    expect(initialStages).toEqual([undefined, undefined]);
     let attempted;
-    let fail = true;
     patchWithCleanup(offline._queue.db, {
         async write(table, ...args) {
             if (table === "entries") {
                 attempted = args[0].length;
-                if (fail) {
-                    throw new Error("Storage is full");
-                }
+                expect(source.records).toHaveLength(0);
+                expect(target.records.slice(0, 2).map(({ data }) => data.stage)).toEqual(["won", "won"]);
+                throw new Error("Storage is full");
             }
             return super.write(table, ...args);
         },
     });
-    const calls = [1, 2].map((id) => ({
-        model: "res.partner", method: "write", args: [[id], { name: "Moved" }], kwargs: {},
-    }));
-    expect(await offline.scheduleORMBatch(calls)).toBe(undefined);
+    await setOffline(true);
+    await groupList.moveRecords(source.records.map(({ id }) => id), null, target.id);
+    await animationFrame();
     expect(attempted).toBe(2);
+    expect(source.records.map(({ data }) => data.stage)).toEqual(initialStages);
+    expect(groupList.groups.map((_, index) =>
+        queryAllTexts(`.o_kanban_group:eq(${index}) .o_kanban_record`)
+    )).toEqual(initialCards);
     expect(await offline._queue.list()).toEqual([]);
     expect(offline.getPendingEntries()).toEqual([]);
-
-    fail = false;
-    expect(await offline.scheduleORMBatch(calls)).toHaveLength(2);
-    expect((await offline._queue.list()).map((entry) => entry.args[0])).toEqual([[1], [2]]);
 });
 
 test("a failed bulk offline save restores the original values in the view", async () => {
