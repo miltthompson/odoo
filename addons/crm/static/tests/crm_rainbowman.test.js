@@ -4,11 +4,16 @@ import {
     contains,
     defineModels,
     fields,
+    getService,
     models,
     mountView,
     onRpc,
+    patchWithCleanup,
 } from "@web/../tests/web_test_helpers";
 import { serializeDateTime } from "@web/core/l10n/dates";
+import { ConnectionLostError } from "@web/core/network/rpc";
+import { OfflinePlugin } from "@web/core/offline/offline_plugin";
+import { Record } from "@web/model/relational_model/record";
 
 const now = luxon.DateTime.now();
 class Users extends models.Model {
@@ -189,6 +194,51 @@ onRpc("crm.lead", "get_rainbowman_message", ({ parent }) => {
     expect.step(result || "no rainbowman");
     return result;
 });
+
+for (const knownOffline of [true, false]) {
+    test(knownOffline
+        ? "an offline queued stage change still advances the opportunity pager"
+        : "a lost celebration response does not block paging after a queued stage change", async () => {
+        let record;
+        patchWithCleanup(Record.prototype, {
+            setup(config) {
+                super.setup(...arguments);
+                if (config.isRoot && this.resModel === "crm.lead") {
+                    record = this;
+                }
+            },
+        });
+        onRpc("/web/offline/sync", () => new Response(JSON.stringify({ error: {
+            code: 0, data: { name: "odoo.exceptions.AccessError" },
+        } })));
+        await mountView({ ...testFormView, resId: 1, resIds: [1, 2], config: { actionId: 42 } });
+        patchWithCleanup(record.model.orm, {
+            async call(model, method) {
+                if (model === "crm.lead" && method === "get_rainbowman_message") {
+                    expect.step("celebration requested");
+                    throw new ConnectionLostError("/web/dataset/call_kw/crm.lead/get_rainbowman_message");
+                }
+                return super.call(...arguments);
+            },
+        });
+        const offline = getService(OfflinePlugin);
+        const changes = { name: "Queued source edit" };
+        const key = await offline.scheduleORMDurably("crm.lead", "web_save", [[1], changes], {}, {
+            extras: { actionId: 42, viewType: "form", changes },
+        });
+        await offline.syncPendingChanges();
+        await record.setOfflineChanges(key);
+        await record.update({ stage_id: { id: 3, display_name: "Won" } });
+        offline.setOffline(knownOffline);
+
+        expect(await record.save({ nextId: 2 })).toBe(true);
+        expect(record.resId).toBe(2);
+        expect((await offline._queue.list()).at(-1).args).toEqual([[1], { stage_id: 3 }]);
+        expect.verifySteps(knownOffline ? [] : ["celebration requested"]);
+        offline.setOffline(false);
+        await offline.syncPendingChanges();
+    });
+}
 
 test.tags("desktop");
 test("first lead won, click on statusbar on desktop", async () => {
