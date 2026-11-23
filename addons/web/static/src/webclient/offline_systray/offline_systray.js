@@ -41,7 +41,7 @@ class OfflineSystray extends Component {
                 actionName: extras.actionName,
                 displayName: extras.displayName || pending.label,
                 clickable: this.isClickable(value),
-                retryKey: pending.state === "needs_attention" && !extras.error && pending.key,
+                retryKey: pending.state === "needs_attention" && !pending.manualRecovery && !extras.error && pending.key,
                 error: extras.error || pending.error,
                 status: { label: _t("Changed"), color: 3 },
                 tooltip: { timeStamp, records: extras.displayNames || [] },
