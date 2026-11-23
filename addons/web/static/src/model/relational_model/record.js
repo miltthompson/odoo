@@ -2,6 +2,7 @@ import { markRaw, markup, toRaw } from "@odoo/owl";
 import { serializeDate, serializeDateTime } from "@web/core/l10n/dates";
 import { _t } from "@web/core/l10n/translation";
 import { ConnectionLostError, RPCError } from "@web/core/network/rpc";
+import { x2ManyCommands } from "@web/core/orm_plugin";
 import { evaluateBooleanExpr } from "@web/core/py_js/py";
 import { pick } from "@web/core/utils/objects";
 import { DataPoint } from "./datapoint";
@@ -198,7 +199,7 @@ export class Record extends DataPoint {
                 });
             } catch (e) {
                 if (e instanceof ConnectionLostError) {
-                    return this.model.offlinePlugin.scheduleORM(
+                    return this.model.offlinePlugin.scheduleORMDurably(
                         this.resModel,
                         "web_unlink",
                         [[this.resId]],
@@ -1415,6 +1416,21 @@ export class Record extends DataPoint {
         const offlineChanges = markRaw({ ...(this._offlineChanges || {}), ...this._changes });
         const editingDraft = this.isNew && this._offlineId;
         const changes = this._getChanges(this._changes, { isNew: this.isNew && !editingDraft });
+        let createArgs;
+        if (editingDraft) {
+            const values = this._getChanges();
+            const { CREATE, UPDATE, DELETE, set } = x2ManyCommands;
+            for (const [fieldName, commands] of Object.entries(values)) {
+                if (this.fields[fieldName].type === "many2many") {
+                    // Committing a draft clears its commands, but not its selected tags.
+                    values[fieldName] = [
+                        set(this.data[fieldName].currentIds.filter((id) => typeof id === "number")),
+                        ...commands.filter(([op]) => op === CREATE || op === UPDATE || op === DELETE),
+                    ];
+                }
+            }
+            createArgs = [[], values];
+        }
         const timeStamp = this._offlineTimeStamp || Date.now();
         return {
             call: {
@@ -1426,7 +1442,7 @@ export class Record extends DataPoint {
                     id: this._offlineId,
                     // The queue checks for the original create under its lock. If it was
                     // discarded, a new create must carry all values, not just this edit.
-                    createArgs: editingDraft ? [[], this._getChanges()] : undefined,
+                    createArgs,
                     extras: {
                         ...getScheduleORMExtras(this.model, [this]),
                         changes: this._formatOfflineValues(offlineChanges),
@@ -1514,7 +1530,7 @@ export class Record extends DataPoint {
             });
         } catch (e) {
             if (e instanceof ConnectionLostError) {
-                return this.model.offlinePlugin.scheduleORM(
+                return this.model.offlinePlugin.scheduleORMDurably(
                     this.resModel,
                     method,
                     [[this.resId]],

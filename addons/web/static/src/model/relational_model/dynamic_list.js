@@ -285,7 +285,7 @@ export class DynamicList extends DataPoint {
             });
         } catch (e) {
             if (e instanceof ConnectionLostError) {
-                this.model.offlinePlugin.scheduleORM(
+                const key = await this.model.offlinePlugin.scheduleORMDurably(
                     this.resModel,
                     "web_unlink",
                     [resIds],
@@ -294,6 +294,9 @@ export class DynamicList extends DataPoint {
                         extras: getScheduleORMExtras(this.model, records),
                     }
                 );
+                if (key === false) {
+                    return false;
+                }
                 this._unselectAll();
                 return true;
             }
@@ -571,7 +574,7 @@ export class DynamicList extends DataPoint {
         } catch (e) {
             if (e instanceof ConnectionLostError) {
                 const records = this.records.filter((r) => resIds.includes(r.resId));
-                this.model.offlinePlugin.scheduleORM(
+                const key = await this.model.offlinePlugin.scheduleORMDurably(
                     this.resModel,
                     method,
                     [resIds],
@@ -580,6 +583,9 @@ export class DynamicList extends DataPoint {
                         extras: getScheduleORMExtras(this.model, records),
                     }
                 );
+                if (key === false) {
+                    return false;
+                }
                 this._unselectAll();
                 return true;
             }

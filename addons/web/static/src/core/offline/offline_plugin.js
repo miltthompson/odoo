@@ -309,6 +309,12 @@ export class OfflinePlugin extends Plugin {
         return entry.legacyKey;
     }
 
+    /** Return the compatibility key only after this fallback action is safely queued. */
+    async scheduleORMDurably(model, method, args, kwargs, options) {
+        const keys = await this.scheduleORMBatch([{ model, method, args, kwargs, options }]);
+        return keys ? keys[0] : false;
+    }
+
     /** Persist individual calls together locally; no entries are shown if storage fails. */
     async scheduleORMBatch(calls) {
         if (!this._queue) {
@@ -319,6 +325,12 @@ export class OfflinePlugin extends Plugin {
         }
         let keys;
         await this._enqueueWrite(async () => {
+            if (calls.some(({ method, args, options }) =>
+                method === "web_save" && !args[0]?.length && options?.id !== undefined
+            )) {
+                // A different tab may have discarded the draft since our last read.
+                await this._refreshQueue();
+            }
             const entries = calls.map((call) => this._makeEntry(call));
             let saved;
             try {
