@@ -33,6 +33,12 @@ function formatPendingValue(value) {
     return value?.display_name ?? (value && typeof value === "object" ? JSON.stringify(value) : value);
 }
 
+function describeLineValues(values) {
+    return Object.entries(values).map(([field, value]) =>
+        _t("%(field)s: %(value)s", { field, value: formatPendingValue(value) })
+    ).join(", ");
+}
+
 function describeLineChanges(changes, targets = []) {
     const { CREATE, UPDATE, DELETE, UNLINK } = x2ManyCommands;
     return changes.map((command) => {
@@ -41,21 +47,25 @@ function describeLineChanges(changes, targets = []) {
         }
         const [operation, id, values] = command;
         if ((operation === CREATE || operation === UPDATE) && values && typeof values === "object") {
-            const fields = Object.entries(values).map(([field, value]) =>
-                _t("%(field)s: %(value)s", { field, value: formatPendingValue(value) })
-            ).join(", ");
+            const fields = describeLineValues(values);
             if (operation === CREATE) {
                 return _t("Add line: %s", fields);
             }
-            const target = targets.find((line) => line.id === id);
-            if (target?.name) {
-                return _t("Edit line %(position)s (%(name)s): %(fields)s", { ...target, fields });
-            }
-            if (target) {
-                return _t("Edit line %(position)s: %(fields)s", { ...target, fields });
-            }
             if (Number.isSafeInteger(id) && id > 0) {
                 return _t("Edit line (record ID %(id)s): %(fields)s", { id, fields });
+            }
+            const target = targets.find((line) => line.id === id);
+            if (target?.position && target.name) {
+                return _t("Edit line %(position)s (%(name)s): %(fields)s", { ...target, fields });
+            }
+            if (target?.position) {
+                return _t("Edit line %(position)s: %(fields)s", { ...target, fields });
+            }
+            if (target?.original) {
+                const original = describeLineValues(target.original);
+                if (original) {
+                    return _t("Edit draft line (original values: %(original)s): %(fields)s", { original, fields });
+                }
             }
             return _t("Edit line: %s", fields);
         }
