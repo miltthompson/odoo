@@ -18,6 +18,8 @@ import {
     parseServerValue,
 } from "./utils";
 
+const LOAD_NEXT_RECORD = Symbol("load next record");
+
 /**
  * Redefine default 'Record' type
  * TODO: rename 'Record' to 'RelationalRecord'?
@@ -299,7 +301,13 @@ export class Record extends DataPoint {
      */
     async save(options) {
         await this.model._askChanges();
-        return this.model.mutex.exec(() => this._save(options));
+        const result = await this.model.mutex.exec(() => this._save(options));
+        if (result === LOAD_NEXT_RECORD) {
+            // onRootLoaded can take the mutex to restore the destination's queued edits.
+            await this.model.load({ resId: options.nextId });
+            return true;
+        }
+        return result;
     }
 
     /**
@@ -385,7 +393,10 @@ export class Record extends DataPoint {
     setOfflineChanges(id) {
         let scheduledORM;
         if (id) {
-            scheduledORM = this.model.offlinePlugin._ormToSync()[id];
+            const entry = this.model.offlinePlugin.getPendingEntries().find((item) => item.key === id);
+            scheduledORM = entry
+                ? { key: entry.legacyKey, value: entry }
+                : this.model.offlinePlugin._ormToSync()[id];
         } else {
             scheduledORM = Object.values(this.model.offlinePlugin._ormToSync()).find(
                 (s) =>
@@ -1308,7 +1319,7 @@ export class Record extends DataPoint {
         const recoveryReason = this._getDraftRecoveryReason(changes);
         if ((!creation || this._offlineId) && !Object.keys(changes).length) {
             if (nextId) {
-                return this.model.load({ resId: nextId });
+                return LOAD_NEXT_RECORD;
             }
             // toRaw to prevent effect
             this._changes = markRaw({});
@@ -1358,6 +1369,9 @@ export class Record extends DataPoint {
             }
             return succeeded;
         }
+        if (creation && this._offlineDraft && !pendingDraft && !recoveryReason) {
+            this._restoreDraftTags(changes);
+        }
         const canProceed = await this.model.hooks.onWillSaveRecord(this, changes);
         if (canProceed === false) {
             return false;
@@ -1373,7 +1387,7 @@ export class Record extends DataPoint {
             } else if (saved && pendingDraft) {
                 offline.syncPendingChanges();
             }
-            return saved;
+            return saved && nextId ? LOAD_NEXT_RECORD : saved;
         }
         // Reload a replayed draft to replace browser-only line IDs with their server IDs.
         reload ||= replayedDraft;
@@ -1468,6 +1482,63 @@ export class Record extends DataPoint {
         }
     }
 
+    _getRecoveryLineTargets(changes) {
+        const targets = {};
+        for (const [fieldName, commands] of Object.entries(changes)) {
+            if (this.fields[fieldName].type !== "one2many") {
+                continue;
+            }
+            const list = this.data[fieldName];
+            const defaultOrder = this.activeFields[fieldName]?.defaultOrderBy || [];
+            // Even the default sort can put draft lines in a different order after
+            // sync (for example, sorting by ID when the lines don't have one yet).
+            const hasSort = list.orderBy.length || defaultOrder.length;
+            const lines = [];
+            for (const [operation, id, values] of commands) {
+                if (operation !== x2ManyCommands.UPDATE || (Number.isSafeInteger(id) && id > 0)) {
+                    continue;
+                }
+                const line = list._cache[id];
+                const index = list.currentIds.indexOf(id);
+                if (!hasSort && index !== -1) {
+                    const data = line?.data;
+                    lines.push({ id, position: index + 1, name: data?.display_name || data?.name });
+                } else if (line) {
+                    // A virtual row's UPDATE can include its entire create payload.
+                    const changedFields = Object.keys(values).filter((name) => name in line._changes);
+                    const names = new Set(["name", ...list.orderBy.map(({ name }) => name), ...changedFields]);
+                    const canDescribe = (name) => name !== "id" && line._values[name] !== undefined && [
+                        "char", "integer", "float", "monetary", "boolean", "selection", "date", "datetime", "many2one",
+                    ].includes(line.fields[name]?.type);
+                    const original = Object.fromEntries([...names].filter(canDescribe).map((name) => [name, line._values[name]]));
+                    const hintValue = (value) => value?.display_name ?? value?.valueOf();
+                    const matches = (other, name) => hintValue(other._values[name]) === hintValue(line._values[name]);
+                    let matchingLines = list.currentIds.map((key) => list._cache[key]).filter((other) =>
+                        other && other !== line && Object.keys(original).every((name) => matches(other, name))
+                    );
+                    // Add visible values only when they distinguish the line from a matching row.
+                    for (const name of Object.keys(list.activeFields)) {
+                        if (!matchingLines.length) {
+                            break;
+                        }
+                        if (!names.has(name) && canDescribe(name) && line.activeFields[name] && !line._isInvisible(name)) {
+                            const remaining = matchingLines.filter((other) => matches(other, name));
+                            if (remaining.length < matchingLines.length) {
+                                original[name] = line._values[name];
+                                matchingLines = remaining;
+                            }
+                        }
+                    }
+                    lines.push({ id, original: line._formatOfflineValues(original, { changes: false }) });
+                }
+            }
+            if (lines.length) {
+                targets[fieldName] = lines;
+            }
+        }
+        return targets;
+    }
+
     _commitSave(records) {
         this._values = markRaw({ ...this._values, ...this._changes });
         if ("id" in this.activeFields && records) {
@@ -1494,26 +1565,27 @@ export class Record extends DataPoint {
         return true;
     }
 
+    _restoreDraftTags(values) {
+        const { CREATE, UPDATE, DELETE, set } = x2ManyCommands;
+        for (const [fieldName, commands] of Object.entries(values)) {
+            if (this.fields[fieldName].type === "many2many") {
+                // Committing a draft clears its commands, but not its selected tags.
+                values[fieldName] = [
+                    set(this.data[fieldName].currentIds.filter((id) => typeof id === "number")),
+                    ...commands.filter(([op]) => op === CREATE || op === UPDATE || op === DELETE),
+                ];
+            }
+        }
+        return values;
+    }
+
     _prepareOfflineSave(recoveryReason) {
         const offlineChanges = markRaw({ ...(this._offlineChanges || {}), ...this._changes });
         const editingDraft = this.isNew && this._offlineId;
         const changes = this._getChanges(this._changes, { isNew: this.isNew && !editingDraft });
-        let createArgs;
-        if (editingDraft) {
-            const values = this._getChanges();
-            const { CREATE, UPDATE, DELETE, set } = x2ManyCommands;
-            for (const [fieldName, commands] of Object.entries(values)) {
-                if (this.fields[fieldName].type === "many2many") {
-                    // Committing a draft clears its commands, but not its selected tags.
-                    values[fieldName] = [
-                        set(this.data[fieldName].currentIds.filter((id) => typeof id === "number")),
-                        ...commands.filter(([op]) => op === CREATE || op === UPDATE || op === DELETE),
-                    ];
-                }
-            }
-            createArgs = [[], values];
-        }
+        const createArgs = editingDraft ? [[], this._restoreDraftTags(this._getChanges())] : undefined;
         const timeStamp = this._offlineTimeStamp || Date.now();
+        const manualRecovery = recoveryReason || this._getDraftRecoveryReason(changes);
         return {
             call: {
                 model: this.resModel,
@@ -1523,7 +1595,7 @@ export class Record extends DataPoint {
                 options: {
                     id: this._offlineId,
                     draftCreate: this._offlineDraft,
-                    manualRecovery: recoveryReason || this._getDraftRecoveryReason(changes),
+                    manualRecovery,
                     // The queue checks for the original create under its lock. If it was
                     // discarded, a new create must carry all values, not just this edit.
                     createArgs,
@@ -1535,6 +1607,7 @@ export class Record extends DataPoint {
                             { changes: false }
                         ),
                         timeStamp,
+                        ...(manualRecovery && { recoveryLineTargets: this._getRecoveryLineTargets(changes) }),
                     },
                 },
             },

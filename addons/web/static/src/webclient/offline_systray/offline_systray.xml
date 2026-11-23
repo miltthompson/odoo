@@ -2,13 +2,15 @@
 <templates xml:space="preserve">
 
     <t t-name="web.OfflineSystray">
+        <span t-if="this.offlinePlugin.isOffline() or this.offlinePlugin.hasScheduledCalls" class="position-relative">
         <Dropdown
-            t-if="this.offlinePlugin.isOffline() or this.offlinePlugin.hasScheduledCalls"
-            navigationOptions="{ 'shouldFocusChildInput': false }"
+            state="this.dropdown"
+            navigationOptions="this.navigationOptions"
             disabled="!this.offlinePlugin.hasScheduledCalls">
             <div
                 t-if="this.uiService.isSmall"
                 t-on-click="() => this.offlinePlugin.checkConnection()"
+                t-att-aria-description="this.pendingCount ? this.counterLabel : undefined"
                 class="o_nav_entry o_offline_systray">
                     <i t-attf-class="oi me-1" t-att-data-icon="this.labelIcon"
                     role="img"
@@ -19,24 +21,26 @@
                 t-attf-class="o_nav_entry px-2 o_tag {{ this.labelColor }} o_offline_systray"
                 data-available-offline=""
                 t-on-click="() => this.offlinePlugin.checkConnection()"
+                t-att-aria-description="this.pendingCount ? this.counterLabel : undefined"
                 data-tooltip="Click to check connection and Sync">
                 <i t-attf-class="oi me-1" t-att-data-icon="this.labelIcon"/><t t-out="this.labelText"></t><i t-if="this.offlinePlugin.hasScheduledCalls" class="oi ms-2" data-icon="arrow_drop_down"/>
             </button>
             <t t-set-slot="content">
                 <div class="o_offline_systray_content px-2">
                     <p t-if="this.offlinePlugin.getQueueError()" role="alert" class="text-danger" t-out="this.offlinePlugin.getQueueError()"/>
-                    <t t-foreach="this.groupEntries()" t-as="entry" t-key="entry[0]">
-                        <div class="o_horizontal_separator text-uppercase fw-bolder small mb-1">
-                            <span t-out="entry[0]"/>
+                    <t t-foreach="this.groupEntries()" t-as="entry" t-key="entry.id">
+                        <div t-if="entry.name" class="o_horizontal_separator text-uppercase fw-bolder small mb-1">
+                            <span t-out="entry.name"/>
                         </div>
-                        <t t-foreach="entry[1]" t-as="element" t-key="element.id">
+                        <t t-foreach="entry.items" t-as="element" t-key="element.id">
                             <DropdownItem
-                                onSelected="() => element.clickable and this.openView(element.id)"
+                                onSelected="() => element.clickable and this.openView(element.entry)"
                                 closingMode="element.clickable ? 'all' : 'none'"
                                 class="{
                                     'pe-1': true,
                                     'px-0': true,
-                                    'd-flex': true,
+                                    'o_offline_pending_item': true,
+                                    'border-top': !element.sameRecord,
                                     'o_cursor_auto': !element.clickable,
                                     'o_disabled_while_sync': this.offlinePlugin.syncingORM(),
                                     'mb-2': element_last,
@@ -53,11 +57,25 @@
                                         <t class="o_tag_badge_text o_badge_text" t-out="element.status.label"/>
                                     </span>
                                 </div>
-                                <button t-if="element.retryKey" class="btn btn-link p-0 ms-1" data-available-offline="" t-on-click.stop="() => this.offlinePlugin.retryPendingChange(element.retryKey)">Retry</button>
+                                <span class="o_offline_pending_details text-wrap">
+                                    <strong t-if="!element.sameRecord" class="d-block" t-out="element.recordName"/>
+                                    <span t-out="element.description"/> · <time t-out="element.timeStamp"/>
+                                    <small class="d-block" t-out="element.stateLabel"/>
+                                    <small t-if="element.reason" class="d-block text-danger" t-out="element.reason"/>
+                                    <ul t-if="element.recoveryValues?.length" class="mb-0 ps-3 o_offline_recovery_values">
+                                        <li t-foreach="element.recoveryValues" t-as="change" t-key="change[0]">
+                                            <t t-out="change[0]"/>: <t t-out="change[1]"/>
+                                        </li>
+                                    </ul>
+                                    <button t-if="element.clickable" type="button" class="btn btn-link p-0 me-2" data-available-offline="" t-on-click.stop="() => this.openView(element.entry, true)">Open</button>
+                                    <button t-if="element.retryKey" type="button" class="btn btn-link p-0" data-available-offline="" t-att-disabled="this.offlinePlugin.syncingORM()" t-on-click.stop="() => this.offlinePlugin.retryPendingChange(element.retryKey)">Retry</button>
+                                </span>
                                 <div t-if="element.discardable">
                                     <button
                                         class="oi oi-filled btn btn-link text-danger py-0" data-icon="delete"
                                         title="Discard offline changes"
+                                        aria-label="Discard offline changes"
+                                        t-att-disabled="this.offlinePlugin.syncingORM()"
                                         data-available-offline=""
                                         t-on-click.stop="() => this.discard(element.id)"/>
                                 </div>
@@ -67,6 +85,12 @@
                 </div>
             </t>
         </Dropdown>
+        <span t-if="this.pendingCount" class="o_offline_pending_count badge rounded-pill text-bg-primary position-absolute top-0 end-0 pe-none" aria-hidden="true" t-out="this.pendingCount"/>
+        </span>
+        <span aria-live="polite" aria-atomic="true" class="visually-hidden">
+            <span t-if="this.announcement().alternate" t-out="this.announcement().text"/>
+            <span t-else="" t-out="this.announcement().text"/>
+        </span>
     </t>
 
     <t t-name="web.OfflineSystrayTooltip">
