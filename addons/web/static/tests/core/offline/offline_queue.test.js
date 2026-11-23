@@ -466,6 +466,36 @@ test("atomic steps are persisted and sent together after their external dependen
     expect(offline.getPendingEntries()).toEqual([]);
 });
 
+test("a rejected stepped operation blocks edits to its resolved server record", async () => {
+    const sent = [];
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        sent.push(params);
+        return params.steps ? rejection(0, "odoo.exceptions.AccessError") : true;
+    });
+    await makeTestApp();
+    const offline = getService(OfflinePlugin);
+    const createKey = "a213a798-292f-4a42-a516-d4e76c5735ce";
+    const steps = [{
+        model: "res.partner", method: "write", args: [[`offline:${createKey}`], { active: false }],
+        kwargs: {}, refs: [createKey],
+    }];
+    await offline._queue.lock(async () => {
+        const id = offline.scheduleORMSteps(steps, { target: { model: "res.partner", ids: [-1] } });
+        expect(offline.getPendingEntry(id).target.ids).toEqual([-1]);
+        // Another tab completes replay before scheduleORM can acquire the write lock.
+        await offline._queue.recordResolution("res.partner", -1, createKey, 47);
+    });
+    queueChange(offline, 47, "Later edit", Date.now());
+    await offline._syncORM();
+    const [bundle, edit] = offline.getPendingEntries();
+    expect(bundle.target.ids).toEqual([47]);
+    expect(bundle.state).toBe("needs_attention");
+    expect(edit.state).toBe("held_back");
+    expect(sent).toHaveLength(1);
+    expect(sent[0].steps).toEqual(steps);
+});
+
 test("expired login pauses replay without discarding or reclassifying remaining changes", async () => {
     const sent = [];
     onRpc("/web/offline/sync", async (request) => {

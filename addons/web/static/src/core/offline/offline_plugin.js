@@ -303,7 +303,8 @@ export class OfflinePlugin extends Plugin {
                 if (this._hasUnsavedDependency(entry)) {
                     throw new Error("An earlier offline change has not been saved");
                 }
-                this._replaceEntry(await this._queue.add(entry));
+                const target = await this._resolveQueueTarget(entry.target);
+                this._replaceEntry(await this._queue.add({ ...entry, target }));
                 this._failedWriteKeys.delete(entry.key);
             } catch (error) {
                 this._failedWriteKeys.add(entry.key);
@@ -340,13 +341,7 @@ export class OfflinePlugin extends Plugin {
                 const draftKey = call.options?.draftKey;
                 const resolution = draftKey && !call.args[0]?.length &&
                     await this._queue.resolveRecord(call.model, draftKey);
-                let target = call.options?.target;
-                if (target?.ids.some(isOfflineRecordId)) {
-                    // A create may have replayed between reference lookup and acquiring this lock.
-                    const ids = await Promise.all(target.ids.map(async (id) => isOfflineRecordId(id)
-                        ? (await this._queue.resolveRecord(target.model, id))?.id ?? id : id));
-                    target = { ...target, ids: [...new Set(ids)] };
-                }
+                const target = await this._resolveQueueTarget(call.options?.target);
                 return this._makeEntry({
                     ...call,
                     options: { ...call.options, target, resolvedDraftId: resolution?.id },
@@ -375,6 +370,16 @@ export class OfflinePlugin extends Plugin {
             keys = saved.map((entry) => entry.legacyKey);
         });
         return keys;
+    }
+
+    async _resolveQueueTarget(target) {
+        if (!target?.ids.some(isOfflineRecordId)) {
+            return target;
+        }
+        // A create may have replayed between reference lookup and acquiring the queue lock.
+        const ids = await Promise.all(target.ids.map(async (id) => isOfflineRecordId(id)
+            ? (await this._queue.resolveRecord(target.model, id))?.id ?? id : id));
+        return { ...target, ids: [...new Set(ids)] };
     }
 
     /** Queue all steps as one change. `target` is the record affected by the whole operation. */
