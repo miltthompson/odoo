@@ -374,13 +374,14 @@ export class Record extends DataPoint {
     }
 
     setOfflineChanges(id) {
-        if (isOfflineRecordId(this.resId)) {
+        if (isOfflineRecordId(this.resId) && !id) {
             return;
         }
         let scheduledORM;
         let entry;
+        let exactEntry;
         if (id) {
-            entry = this.model.offlinePlugin.getPendingEntries().find((item) => item.key === id);
+            exactEntry = entry = this.model.offlinePlugin.getPendingEntries().find((item) => item.key === id);
             scheduledORM = entry
                 ? { key: entry.legacyKey, value: entry }
                 : this.model.offlinePlugin._ormToSync()[id];
@@ -397,10 +398,20 @@ export class Record extends DataPoint {
             this._offlineId = scheduledORM.key;
             entry ||= this.model.offlinePlugin.getPendingEntry(scheduledORM.key);
             if (entry?.createdId) {
-                // The original dropdown link may open the cached blank form. Turn it into
-                // the saved local record, so a further save is a write, not another create.
+                // A compatibility link can still open the cached blank form.
                 this.config.resId = entry.createdId;
                 this.config.resIds = [entry.createdId];
+            }
+            if (exactEntry?.extras?.overlayValues &&
+                (this.model.shouldApplyOfflineOverlay || isOfflineRecordId(this.resId))) {
+                const { overlayBefore, overlayValues } = exactEntry.extras;
+                this._setData({
+                    ...this._offlineOverlayValues(this.data),
+                    ...overlayBefore,
+                    ...overlayValues,
+                    id: this.resId,
+                });
+            } else if (entry?.createdId) {
                 const change = this.model.getOfflineOverlay(this.config, this.resId).get(this.resId);
                 this._setData({ ...this._getDefaultValues(), ...change?.patch, id: this.resId });
             } else if (!this.model.shouldApplyOfflineOverlay || !entry?.extras?.overlayValues) {
@@ -1267,14 +1278,15 @@ export class Record extends DataPoint {
             this.model.useSendBeaconToSaveUrgently &&
             !this.model.env.inDialog
         ) {
-            // We are trying to sa ve urgently because the user is closing the page when offline.
-            // Unfortunately, we can't save on IndexedDB before unload.
-            if (this.model.offlinePlugin.isOffline()) {
+            // There isn't time for a durable IndexedDB save during page unload, and
+            // a temporary record ID must never reach the normal web_save route.
+            const localRecord = isOfflineRecordId(this.resId);
+            if (localRecord || this.model.offlinePlugin.isOffline()) {
+                const icons = { uploadIcon: markup`<i class="oi oi-fw" data-icon="cloud_upload"></i>` };
                 this.model._closeUrgentSaveNotification = this.model.notification.add(
-                    _t(
-                        `Heads up! Your recent changes cannot be saved automatically while you are offline. Please click the %(uploadIcon)s button now to ensure your work is saved before you exit this tab.`,
-                        { uploadIcon: markup`<i class="oi oi-fw" data-icon="cloud_upload"></i>` }
-                    ),
+                    localRecord
+                        ? _t("Heads up! Changes to this offline record cannot be saved automatically before you exit this tab. Please click the %(uploadIcon)s button now to save them.", icons)
+                        : _t("Heads up! Your recent changes cannot be saved automatically while you are offline. Please click the %(uploadIcon)s button now to ensure your work is saved before you exit this tab.", icons),
                     { sticky: true }
                 );
                 return false;
@@ -1413,6 +1425,8 @@ export class Record extends DataPoint {
             }
             if (["many2many", "one2many"].includes(field.type)) {
                 result[name] = value?._currentIds.map((id) => ({ id, display_name: value._cache[id]?.display_name })) || [];
+            } else if (field.type === "many2one") {
+                result[name] = value ? { ...value } : false;
             } else {
                 result[name] = this._formatServerValue(field.type, value);
             }
@@ -1420,13 +1434,8 @@ export class Record extends DataPoint {
         return result;
     }
 
-    async _offlineReference() {
-        if (isOfflineRecordId(this.resId)) {
-            const local = this.model.offlinePlugin.getRecordReference(this.resModel, this.resId);
-            const resolved = local ? null : await this.model.offlinePlugin.resolveOfflineRecord(this.resModel, this.resId);
-            return local || (resolved && { value: resolved.id });
-        }
-        return { value: this.resId };
+    _offlineReference() {
+        return this.model.offlinePlugin.getReplayRecordReference(this.resModel, this.resId);
     }
 
     async _queueOfflineRecordCall(method) {
@@ -1466,26 +1475,32 @@ export class Record extends DataPoint {
     }
 
     async _prepareOfflineSave() {
-        const creation = this.isNew;
-        const key = window.crypto.randomUUID();
-        const createdId = creation ? offlineRecordId(key) : undefined;
+        const draft = this.isNew && this._offlineId &&
+            this.model.offlinePlugin.getPendingDraftCreate(this.resModel, this._offlineId);
         const reference = await this._offlineReference();
-        if (!reference) {
+        // A still-open local form can outlive a discarded create. Save it as a new
+        // draft with all its values instead of leaving it pointing at the removed ID.
+        const discarded = !reference && this._offlineId && isOfflineRecordId(this.resId);
+        if (!reference && !discarded) {
             return;
         }
-        const changes = this._getChanges();
+        const creation = (this.isNew && !draft) || discarded;
+        const key = window.crypto.randomUUID();
+        const createdId = creation ? offlineRecordId(key) : undefined;
+        const changes = this._getChanges(this._changes, { isNew: creation });
         return {
             call: {
                 model: this.resModel,
                 method: "web_save",
-                args: [creation ? [] : [reference.value], changes],
+                args: [this.isNew || discarded ? [] : [reference.value], changes],
                 kwargs: { context: this.context, specification: {} },
                 options: {
-                    id: this._offlineId,
+                    id: discarded ? undefined : this._offlineId,
                     key,
                     createdId,
-                    refs: reference.key ? [reference.key] : [],
-                    target: { model: this.resModel, ids: [createdId || this.resId] },
+                    expectedDraftKey: draft?.key,
+                    refs: reference?.key ? [reference.key] : [],
+                    target: draft ? undefined : { model: this.resModel, ids: [createdId || this.resId] },
                     extras: {
                         ...getScheduleORMExtras(this.model, [this]),
                         changes: this._formatOfflineValues(this._changes),

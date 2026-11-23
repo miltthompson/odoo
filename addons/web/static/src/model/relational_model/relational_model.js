@@ -2,10 +2,12 @@
 
 import { EventBus, markRaw, usePlugin, toRaw } from "@odoo/owl";
 import { makeContext } from "@web/core/context";
+import { getCurrencyRates } from "@web/core/currency";
 import { Domain } from "@web/core/domain";
 import { WarningDialog } from "@web/core/errors/error_dialogs";
 import { ConnectionLostError, rpcBus } from "@web/core/network/rpc";
 import { isOfflineRecordId } from "@web/core/offline/offline_id";
+import { user } from "@web/core/user";
 import { useBus } from "@web/core/utils/hooks";
 import { shallowEqual } from "@web/core/utils/arrays";
 import { KeepLast, Mutex } from "@web/core/utils/concurrency";
@@ -609,7 +611,20 @@ export class RelationalModel extends Model {
         if (this.shouldApplyOfflineOverlay) {
             const overlay = await this._getOfflineOverlayOnLoad(config);
             if (overlay.size) {
-                response = overlayGroups(response, config, overlay);
+                let rates;
+                const company = user.activeCompany;
+                const companyId = config.context.allowed_company_ids?.[0];
+                const companyCurrency = !companyId || companyId === company?.id ? company?.currency_id : undefined;
+                if (companyCurrency && config.fieldsToAggregate.some((name) => config.fields[name]?.currency_field)) {
+                    try {
+                        rates = await getCurrencyRates();
+                    } catch (error) {
+                        if (!(error instanceof ConnectionLostError)) {
+                            throw error;
+                        }
+                    }
+                }
+                response = overlayGroups(response, config, overlay, rates, companyCurrency);
             }
         }
         return this._postprocessReadGroup(config, response);

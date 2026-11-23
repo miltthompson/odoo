@@ -384,6 +384,18 @@ export class OfflinePlugin extends Plugin {
         return this._queue?.resolveRecord(model, id);
     }
 
+    async getReplayRecordReference(model, id) {
+        if (!isOfflineRecordId(id)) {
+            return { value: id };
+        }
+        const local = this.getRecordReference(model, id);
+        if (local) {
+            return local;
+        }
+        const resolved = await this.resolveOfflineRecord(model, id);
+        return resolved && { value: resolved.id };
+    }
+
     async waitForPendingWrite(key) {
         await this._writes;
         const entry = this._pending().find((entry) => entry.key === key);
@@ -600,8 +612,11 @@ export class OfflinePlugin extends Plugin {
             args[0].filter((id) => typeof id === "number" || typeof id === "string")) || [];
         // Before a pending create has a record ID, the legacy form reuses its UI key
         // when reopened. Keep that key, but send the next save as a separate write.
-        const create = options.id !== undefined && method === "web_save" && !args[0]?.length &&
+        const create = !options.createdId && options.id !== undefined && method === "web_save" && !args[0]?.length &&
             this.getPendingDraftCreate(model, legacyKey);
+        if (options.expectedDraftKey && create?.key !== options.expectedDraftKey) {
+            throw new Error("The offline draft is no longer pending");
+        }
         if (!create && options.draftCreateValues && method === "web_save" && !args[0]?.length) {
             args = [args[0], options.draftCreateValues, ...args.slice(2)];
         }

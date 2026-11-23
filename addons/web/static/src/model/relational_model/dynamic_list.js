@@ -279,6 +279,9 @@ export class DynamicList extends DataPoint {
             resIds = await this.getResIds(true);
             records = this.records.filter((r) => resIds.includes(r.resId));
         }
+        if (resIds.some(isOfflineRecordId)) {
+            return this._queueOfflineListCall("web_unlink", resIds, records);
+        }
         let unlinked = false;
         try {
             unlinked = await this.model.orm.webUnlink(this.resModel, resIds, {
@@ -575,6 +578,10 @@ export class DynamicList extends DataPoint {
         const method = state ? "action_archive" : "action_unarchive";
         const context = this.context;
         const resIds = await this.getResIds(isSelected);
+        if (resIds.some(isOfflineRecordId)) {
+            const records = this.records.filter((record) => resIds.includes(record.resId));
+            return this._queueOfflineListCall(method, resIds, records);
+        }
         let action;
         try {
             action = await this.model.orm.call(this.resModel, method, [resIds], { context });
@@ -617,6 +624,32 @@ export class DynamicList extends DataPoint {
         } else {
             return reload();
         }
+    }
+
+    async _queueOfflineListCall(method, resIds, records) {
+        const offline = this.model.offlinePlugin;
+        const references = await Promise.all(
+            resIds.map((id) => offline.getReplayRecordReference(this.resModel, id))
+        );
+        if (references.some((reference) => !reference)) {
+            return false;
+        }
+        const keys = await offline.scheduleORMBatch([{
+            model: this.resModel,
+            method,
+            args: [references.map(({ value }) => value)],
+            kwargs: { context: this.context },
+            options: {
+                refs: unique(references.map(({ key }) => key).filter(Boolean)),
+                target: { model: this.resModel, ids: resIds },
+                extras: getScheduleORMExtras(this.model, records),
+            },
+        }]);
+        if (!keys) {
+            return false;
+        }
+        this._unselectAll();
+        return true;
     }
 
     async _toggleSelection() {
