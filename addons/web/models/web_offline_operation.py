@@ -68,6 +68,20 @@ class WebOfflineOperation(models.Model):
             raise ConcurrencyError('Offline operation already reserved') from exc
 
         calls = steps if steps is not None else [{'model': model, 'method': method, 'args': args, 'kwargs': kwargs, 'refs': refs or []}]
+        # A flushing savepoint prevents replayed methods from committing or
+        # rolling back the request cursor before the result has been recorded.
+        with self.env.cr.savepoint():
+            results, created_by_step = self._replay_calls(calls, Log, uid)
+            response = results if steps is not None else results[0]
+            # Normalize dates and other values the same way as the JSON-RPC transport.
+            response = json.loads(json.dumps(response, default=json_default))
+            operation.write({
+                'result': {'response': response},
+                'created_ids': [record_id for ids in created_by_step for record_id in ids],
+            })
+        return response
+
+    def _replay_calls(self, calls, Log, uid):
         external_refs = {ref for call in calls for ref in call.get('refs', []) if isinstance(ref, str)}
         ids_by_ref = {}
         if external_refs:
@@ -94,14 +108,7 @@ class WebOfflineOperation(models.Model):
             results.append(result)
             created_by_step.append(_created_ids(method, args, kwargs, result))
 
-        response = results if steps is not None else results[0]
-        # Normalize dates and other values the same way as the JSON-RPC transport.
-        response = json.loads(json.dumps(response, default=json_default))
-        operation.write({
-            'result': {'response': response},
-            'created_ids': [record_id for ids in created_by_step for record_id in ids],
-        })
-        return response
+        return results, created_by_step
 
     @api.autovacuum
     def _gc_applied_offline_operations(self):

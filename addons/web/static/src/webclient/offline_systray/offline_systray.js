@@ -187,15 +187,18 @@ class OfflineSystray extends Component {
     });
 
     getRecordId(entry) {
-        return entry.resolvedResId ?? entry.target?.ids?.[0] ?? entry.args[0]?.[0];
+        const args = entry.legacyArgs || entry.args;
+        return entry.resolvedResId ?? (entry.legacyArgs ? args[0]?.[0] : entry.target?.ids?.[0] ?? args[0]?.[0]);
     }
 
     isClickable(value) {
         const resId = this.getRecordId(value) || false;
+        const draft = value.legacyArgs && !value.resolvedResId &&
+            this.offlinePlugin.getPendingDraftCreate(value.model, value.legacyKey);
         return (
             value.method === "web_save" &&
             value.extras?.viewType === "form" &&
-            (!value.legacyArgs || Boolean(value.resolvedResId)) &&
+            (!value.legacyArgs || value.resolvedResId || (draft && value.refs.includes(draft.key))) &&
             (!this.offlinePlugin.isOffline() ||
                 this.offlinePlugin.isAvailableOffline(value.extras.actionId, "form", resId))
         );
