@@ -146,7 +146,7 @@ class OfflineSystray extends Component {
                 displayName: extras.displayName || entry.label || recordName,
                 description: describeChange(entry, recordName),
                 clickable: this.isClickable(entry),
-                retryKey: entry.state === "needs_attention" && entry.key,
+                retryKey: entry.state === "needs_attention" && !entry.manualRecovery && entry.key,
                 error: entry.error,
                 reason: typeof entry.error === "string" ? entry.error : "",
                 stateLabel: CHANGE_STATES[state],
