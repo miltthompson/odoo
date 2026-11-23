@@ -328,10 +328,18 @@ export class OfflinePlugin extends Plugin {
             if (calls.some(({ method, args, options }) =>
                 method === "web_save" && !args[0]?.length && options?.id !== undefined
             )) {
-                // A different tab may have discarded the draft since our last read.
+                // Another tab may have discarded or synced the draft since our last read.
                 await this._refreshQueue();
             }
-            const entries = calls.map((call) => this._makeEntry(call));
+            const entries = await Promise.all(calls.map(async (call) => {
+                const draftKey = call.options?.draftKey;
+                const resolution = draftKey && !call.args[0]?.length &&
+                    await this._queue.resolveRecord(call.model, draftKey);
+                return this._makeEntry({
+                    ...call,
+                    options: { ...call.options, resolvedDraftId: resolution?.id },
+                });
+            }));
             let saved;
             try {
                 if (entries.some((entry) => this._hasUnsavedDependency(entry))) {
@@ -596,6 +604,26 @@ export class OfflinePlugin extends Plugin {
             this._pending().some((earlier) => earlier.seq === null && entry.refs.includes(earlier.key));
     }
 
+    async getDraftSaveState(model, key) {
+        try {
+            return await this._queue.lock(async () => {
+                const entries = await this._refreshQueue();
+                const resolution = await this._queue.resolveRecord(model, key);
+                const resId = resolution?.id;
+                const pending = entries.some((entry) => entry.model === model && (
+                    entry.key === key || (resId && entry.target.ids.includes(resId))
+                ));
+                return { resId, pending };
+            });
+        } catch {
+            this._reportStorageError();
+        }
+    }
+
+    syncPendingChanges() {
+        return this._syncORM(true);
+    }
+
     getPendingDraftCreate(model, legacyKey) {
         return this._pending().find((entry) => entry.model === model && entry.method === "web_save" &&
             String(entry.legacyKey) === String(legacyKey) && !entry.args[0]?.length);
@@ -608,15 +636,21 @@ export class OfflinePlugin extends Plugin {
             args[0].filter((id) => typeof id === "number" || typeof id === "string")) || [];
         // Before a pending create has a record ID, the legacy form reuses its UI key
         // when reopened. Keep that key, but send the next save as a separate write.
-        const create = options.id !== undefined && method === "web_save" && !args[0]?.length &&
-            this.getPendingDraftCreate(model, legacyKey);
+        const draftSave = options.id !== undefined && method === "web_save" && !args[0]?.length;
+        const syncedId = draftSave && options.resolvedDraftId;
+        const create = draftSave && !syncedId && this.getPendingDraftCreate(model, legacyKey);
+        if (syncedId) {
+            args = [[syncedId], ...args.slice(1)];
+            targetIds.push(syncedId);
+        }
         return {
             ...this._owner,
             key: options.key || window.crypto.randomUUID(),
             legacyKey,
             seq: null,
             model, method, kwargs, extras,
-            args: create ? [[`offline:${create.key}`], ...args.slice(1)] : options.createArgs ?? args,
+            args: create ? [[`offline:${create.key}`], ...args.slice(1)] :
+                syncedId ? args : options.createArgs ?? args,
             legacyArgs: create ? args : undefined,
             refs: create ? [create.key, ...(options.refs || [])] : options.refs || [],
             target: options.target || { model, ids: create ? [`offline:${create.key}`] : targetIds },
@@ -764,6 +798,17 @@ export class OfflinePlugin extends Plugin {
                         continue;
                     }
                     await this._queue.lock(async () => {
+                        if (method === "web_save" && !args[0]?.length) {
+                            const id = result?.already_applied ? result.created_ids[0] : result?.[0]?.id;
+                            if (Number.isSafeInteger(id) && id > 0) {
+                                // Persist before removing the create so other tabs distinguish it from a discard.
+                                await this._queue.recordResolution(model, key, key, id);
+                                const updated = await this._queue.rememberDraftRecord(key, model, id);
+                                for (const edit of updated) {
+                                    this._replaceEntry(edit);
+                                }
+                            }
+                        }
                         await this._queue.remove(key);
                         this._removeEntry(key);
                     });

@@ -393,6 +393,11 @@ export class Record extends DataPoint {
         }
         if (scheduledORM) {
             this._offlineId = scheduledORM.key;
+            if (this.isNew) {
+                this._offlineDraftKey = this.model.offlinePlugin.getPendingDraftCreate(
+                    this.resModel, this._offlineId
+                )?.key;
+            }
             this._offlineChanges = markRaw(
                 this._parseOfflineValues(scheduledORM.value.extras.changes)
             );
@@ -1231,6 +1236,26 @@ export class Record extends DataPoint {
         if (this.model._closeUrgentSaveNotification) {
             this.model._closeUrgentSaveNotification();
         }
+        const offline = this.model.offlinePlugin;
+        const urgent = this.model._urgentSave && this.model.useSendBeaconToSaveUrgently &&
+            !this.model.env.inDialog;
+        let pendingDraft = false;
+        if (this._offlineDraftKey) {
+            if (urgent) {
+                // A beacon can't safely wait for the queue or preserve its ordering.
+                pendingDraft = true;
+            } else {
+                const state = await offline.getDraftSaveState(this.resModel, this._offlineDraftKey);
+                if (!state) {
+                    return false;
+                }
+                if (state.resId && !this.resId) {
+                    const resIds = [...new Set([...this.resIds, state.resId])];
+                    this.model._updateConfig(this.config, { resId: state.resId, resIds }, { reload: false });
+                }
+                pendingDraft = state.pending;
+            }
+        }
         const creation = !this.resId;
         if (nextId) {
             if (creation) {
@@ -1260,14 +1285,9 @@ export class Record extends DataPoint {
             this.dirty = false;
             return true;
         }
-        if (
-            this.model._urgentSave &&
-            this.model.useSendBeaconToSaveUrgently &&
-            !this.model.env.inDialog
-        ) {
-            // We are trying to sa ve urgently because the user is closing the page when offline.
-            // Unfortunately, we can't save on IndexedDB before unload.
-            if (this.model.offlinePlugin.isOffline()) {
+        if (urgent) {
+            // There is not enough time to persist queued changes during page unload.
+            if (pendingDraft || offline.isOffline()) {
                 this.model._closeUrgentSaveNotification = this.model.notification.add(
                     _t(
                         `Heads up! Your recent changes cannot be saved automatically while you are offline. Please click the %(uploadIcon)s button now to ensure your work is saved before you exit this tab.`,
@@ -1310,6 +1330,13 @@ export class Record extends DataPoint {
         const canProceed = await this.model.hooks.onWillSaveRecord(this, changes);
         if (canProceed === false) {
             return false;
+        }
+        if (pendingDraft) {
+            const saved = await this._offlineSave();
+            if (saved) {
+                offline.syncPendingChanges();
+            }
+            return saved;
         }
         // keep x2many orderBy if we stay on the same record
         const orderBys = {};
@@ -1437,6 +1464,7 @@ export class Record extends DataPoint {
                 kwargs: { context: this.context, specification: {} },
                 options: {
                     id: this._offlineId,
+                    draftKey: this._offlineDraftKey,
                     // The queue checks for the original create under its lock. If it was
                     // discarded, a new create must carry all values, not just this edit.
                     createArgs,
@@ -1453,6 +1481,11 @@ export class Record extends DataPoint {
             },
             onSaved: (id) => {
                 this._offlineId = id;
+                if (this.isNew) {
+                    this._offlineDraftKey = this.model.offlinePlugin.getPendingDraftCreate(
+                        this.resModel, id
+                    )?.key ?? this._offlineDraftKey;
+                }
                 this._offlineTimeStamp = timeStamp;
                 this._offlineChanges = offlineChanges;
                 this._commitSave();

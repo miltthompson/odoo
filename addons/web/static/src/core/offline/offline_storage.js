@@ -5,6 +5,8 @@ const encoder = new TextEncoder();
 const KEYS = "keys";
 const ENTRIES = "entries";
 const QUEUE_META = "meta";
+const RESOLVED_RECORDS = "resolved-records";
+const RESOLUTION_TTL = 30 * 24 * 60 * 60 * 1000;
 
 export async function offlineDigest(text) {
     const digest = await window.crypto.subtle.digest("SHA-256", encoder.encode(text));
@@ -45,11 +47,11 @@ export class OfflineKeyStore {
         return this.db.read(KEYS, id);
     }
 
-    prune() {
+    prune(retain = new Set()) {
         return navigator.locks.request(this.name, async () => {
             const current = await this.db.read(KEYS, "current");
             for (const key of (await this.db.getAllKeys(KEYS)) || []) {
-                if (key !== "current" && key !== current) {
+                if (key !== "current" && key !== current && !retain.has(key)) {
                     await this.db.delete(KEYS, key);
                 }
             }
@@ -125,10 +127,54 @@ export class OfflineQueueStore {
         await this.db.write(ENTRIES, values);
     }
 
+    async recordResolution(model, localId, key, id) {
+        const current = await this.keys.current();
+        const index = JSON.stringify([model, localId]);
+        const payload = await new Crypto(current.key).encrypt({ id, key });
+        await this.db.write(RESOLVED_RECORDS, index, {
+            payload,
+            keyId: current.id,
+            expires: Date.now() + RESOLUTION_TTL,
+        });
+    }
+
+    async resolveRecord(model, localId) {
+        const row = await this.db.read(RESOLVED_RECORDS, JSON.stringify([model, localId]));
+        if (row?.expires > Date.now()) {
+            const crypto = new Crypto(await this.keys.get(row.keyId));
+            return crypto.decrypt(row.payload);
+        }
+    }
+
+    async rememberDraftRecord(key, model, id) {
+        const updates = (await this.list())
+            .filter((entry) => entry.model === model && entry.legacyArgs && entry.refs.includes(key))
+            .map((entry) => ({
+                ...entry,
+                resolvedResId: id,
+                target: {
+                    ...entry.target,
+                    ids: entry.target.ids.map((targetId) => targetId === `offline:${key}` ? id : targetId),
+                },
+            }));
+        if (updates.length) {
+            await this._writeEntries(updates);
+        }
+        return updates;
+    }
+
     async remove(key) {
         await this.db.delete(ENTRIES, key);
         if (!(await this.db.getAllKeys(ENTRIES))?.length) {
-            await this.keys.prune();
+            const retain = new Set();
+            for (const { key, value } of (await this.db.getAllEntries(RESOLVED_RECORDS)) || []) {
+                if (value.expires > Date.now()) {
+                    retain.add(value.keyId);
+                } else {
+                    await this.db.delete(RESOLVED_RECORDS, key);
+                }
+            }
+            await this.keys.prune(retain);
         }
     }
 }
