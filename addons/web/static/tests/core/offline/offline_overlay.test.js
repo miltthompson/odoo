@@ -1,4 +1,4 @@
-import { expect, test } from "@odoo/hoot";
+import { animationFrame, expect, test } from "@odoo/hoot";
 import { mockSendBeacon } from "@odoo/hoot-mock";
 import {
     contains,
@@ -223,6 +223,7 @@ test("an offline relation keeps its label and ID when a queued form is reopened"
     expect(await record._offlineSave()).toBe(true);
     const id = record.resId;
     await model.load({ resId: id });
+    await animationFrame();
     expect(model.root.data.stage_id).toEqual({ id: 7, display_name: "Qualified" });
     expect(".o_field_widget[name='stage_id'] input").toHaveValue("Qualified");
 });
