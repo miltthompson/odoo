@@ -447,6 +447,28 @@ test("a failed discard cannot leave a marker for a draft that can still replay",
     }
 });
 
+test("discarding an unsent draft removes its queue row and saves the marker in IndexedDB", async () => {
+    const setOffline = mockOffline();
+    await makeTestApp();
+    await setOffline(true);
+    const offline = getService(OfflinePlugin);
+    const db = new RealIndexedDB(`test-offline-discard-${crypto.randomUUID()}`, undefined, { durability: "strict" });
+    patchWithCleanup(offline._queue, { db });
+    try {
+        await offline.scheduleORMDurably("res.partner", "web_save", [[], { name: "Queued" }], {});
+        const [create] = await offline._queue.list();
+        expect(await offline._queue.wasDraftDiscarded(create.key)).toBe(undefined);
+
+        await offline.discardPendingChange(create.key);
+
+        expect(await offline._queue.list()).toEqual([]);
+        expect(await offline._queue.wasDraftDiscarded(create.key)).toBe(true);
+        expect(offline.getPendingEntries()).toEqual([]);
+    } finally {
+        await db.deleteDatabase();
+    }
+});
+
 test("discarding an expired receipt recovery does not mark its original create unsent", async () => {
     mockDate("2026-01-01T12:00:00");
     const sent = [];
