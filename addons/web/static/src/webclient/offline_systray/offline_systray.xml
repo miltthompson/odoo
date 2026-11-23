@@ -62,6 +62,11 @@
                                     <span t-out="element.description"/> · <time t-out="element.timeStamp"/>
                                     <small class="d-block" t-out="element.stateLabel"/>
                                     <small t-if="element.reason" class="d-block text-danger" t-out="element.reason"/>
+                                    <ul t-if="element.recoveryValues?.length" class="mb-0 ps-3 o_offline_recovery_values">
+                                        <li t-foreach="element.recoveryValues" t-as="change" t-key="change[0]">
+                                            <t t-out="change[0]"/>: <t t-out="change[1]"/>
+                                        </li>
+                                    </ul>
                                     <button t-if="element.clickable" type="button" class="btn btn-link p-0 me-2" data-available-offline="" t-on-click.stop="() => this.openView(element.entry, true)">Open</button>
                                     <button t-if="element.retryKey" type="button" class="btn btn-link p-0" data-available-offline="" t-att-disabled="this.offlinePlugin.syncingORM()" t-on-click.stop="() => this.offlinePlugin.retryPendingChange(element.retryKey)">Retry</button>
                                 </span>

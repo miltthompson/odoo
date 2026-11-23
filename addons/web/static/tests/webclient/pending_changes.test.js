@@ -100,6 +100,19 @@ test("a manual recovery opens the server record without applying the queued line
     expect(await offline._queue.list()).toEqual([]);
 });
 
+test("Needs attention shows the stored child-line values without opening the form", async () => {
+    await mountWithCleanup(WebClient);
+    const offline = getService(OfflinePlugin);
+    const line_ids = [[1, "local-line", { description: "Retained text", quantity: 0 }]];
+    await offline.scheduleORMDurably("res.partner", "web_save", [[47], { line_ids }], {}, {
+        manualRecovery: "Reopen the record to reapply this line change.",
+        extras: { viewType: "form", changes: { line_ids } },
+    });
+    await contains(".o_offline_systray").click();
+    expect(".o_offline_recovery_values").toHaveText("line_ids: Edit line: description: Retained text, quantity: 0");
+    expect(".o_offline_pending_item button:contains(Retry)").toHaveCount(0);
+});
+
 test("Open shows the values of the selected save when two saves share a legacy key", async () => {
     class PendingContact extends models.Model {
         _name = "pending.contact";
