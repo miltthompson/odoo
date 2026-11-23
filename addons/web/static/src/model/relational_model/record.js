@@ -1361,6 +1361,9 @@ export class Record extends DataPoint {
             }
             return succeeded;
         }
+        if (creation && this._offlineDraft && !pendingDraft && !recoveryReason) {
+            this._restoreDraftTags(changes);
+        }
         const canProceed = await this.model.hooks.onWillSaveRecord(this, changes);
         if (canProceed === false) {
             return false;
@@ -1375,6 +1378,9 @@ export class Record extends DataPoint {
                 }
             } else if (saved && pendingDraft) {
                 offline.syncPendingChanges();
+            }
+            if (saved && nextId) {
+                await this.model.load({ resId: nextId });
             }
             return saved;
         }
@@ -1522,25 +1528,25 @@ export class Record extends DataPoint {
         return true;
     }
 
+    _restoreDraftTags(values) {
+        const { CREATE, UPDATE, DELETE, set } = x2ManyCommands;
+        for (const [fieldName, commands] of Object.entries(values)) {
+            if (this.fields[fieldName].type === "many2many") {
+                // Committing a draft clears its commands, but not its selected tags.
+                values[fieldName] = [
+                    set(this.data[fieldName].currentIds.filter((id) => typeof id === "number")),
+                    ...commands.filter(([op]) => op === CREATE || op === UPDATE || op === DELETE),
+                ];
+            }
+        }
+        return values;
+    }
+
     _prepareOfflineSave(recoveryReason) {
         const offlineChanges = markRaw({ ...(this._offlineChanges || {}), ...this._changes });
         const editingDraft = this.isNew && this._offlineId;
         const changes = this._getChanges(this._changes, { isNew: this.isNew && !editingDraft });
-        let createArgs;
-        if (editingDraft) {
-            const values = this._getChanges();
-            const { CREATE, UPDATE, DELETE, set } = x2ManyCommands;
-            for (const [fieldName, commands] of Object.entries(values)) {
-                if (this.fields[fieldName].type === "many2many") {
-                    // Committing a draft clears its commands, but not its selected tags.
-                    values[fieldName] = [
-                        set(this.data[fieldName].currentIds.filter((id) => typeof id === "number")),
-                        ...commands.filter(([op]) => op === CREATE || op === UPDATE || op === DELETE),
-                    ];
-                }
-            }
-            createArgs = [[], values];
-        }
+        const createArgs = editingDraft ? [[], this._restoreDraftTags(this._getChanges())] : undefined;
         const timeStamp = this._offlineTimeStamp || Date.now();
         const manualRecovery = recoveryReason || this._getDraftRecoveryReason(changes);
         return {
