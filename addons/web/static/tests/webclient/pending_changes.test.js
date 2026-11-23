@@ -157,6 +157,52 @@ test("Needs attention identifies which of several draft lines to edit", async ()
     expect(line).toMatch(/^line_ids: Edit line 2 \(Second line\): (name: Second line, )?quantity: 2$/);
 });
 
+test("manual recovery identifies a sorted draft line by its original values, not its position", async () => {
+    class Draft extends models.Model {
+        name = fields.Char();
+        line_ids = fields.One2many({ relation: "line", relation_field: "draft_id" });
+        _views = { "form,false": `<form><field name="name"/><field name="line_ids">
+            <list editable="bottom"><field name="name"/><field name="quantity"/></list>
+        </field></form>` };
+    }
+    class Line extends models.Model {
+        name = fields.Char();
+        quantity = fields.Integer();
+        draft_id = fields.Many2one({ relation: "draft" });
+    }
+    defineModels([Draft, Line, ...Object.values(webModels)]);
+    defineActions([{ id: 5, res_model: "draft", views: [[false, "form"]] }]);
+    let record;
+    patchWithCleanup(Record.prototype, {
+        setup(config) {
+            super.setup(...arguments);
+            if (config.isRoot && this.resModel === "draft") {
+                record = this;
+            }
+        },
+    });
+    onRpc("/web/offline/sync", () => [{ id: 47 }]);
+    await mountWithCleanup(WebClient);
+    await getService("action").doAction(5);
+    await waitFor(".o_form_view");
+    const offline = getService(OfflinePlugin);
+    const changes = {
+        name: "Draft",
+        line_ids: [[0, 0, { name: "Same", quantity: 8 }], [0, 0, { name: "Same", quantity: 1 }]],
+    };
+    const id = await offline.scheduleORMDurably("draft", "web_save", [[], changes], {}, { extras: { changes } });
+    await record.setOfflineChanges(id);
+    await offline.syncPendingChanges();
+    await record.data.line_ids.sortBy("quantity");
+    const secondLine = record.data.line_ids.records[1];
+    expect(secondLine.data.quantity).toBe(8);
+    await secondLine.update({ quantity: 9 });
+    expect(await record.save()).toBe(true);
+    await contains(".o_offline_systray").click();
+    const line = queryAllTexts(".o_offline_recovery_values li").find((text) => text.startsWith("line_ids:"));
+    expect(line).toMatch(/^line_ids: Edit draft line \(original values: name: Same, quantity: 8\): (name: Same, )?quantity: 9$/);
+});
+
 test("Open shows the values of the selected save when two saves share a legacy key", async () => {
     class PendingContact extends models.Model {
         _name = "pending.contact";

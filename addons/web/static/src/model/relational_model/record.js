@@ -1521,15 +1521,34 @@ export class Record extends DataPoint {
                 continue;
             }
             const list = this.data[fieldName];
+            const defaultOrder = this.activeFields[fieldName]?.defaultOrderBy || [];
+            const reordered = list.orderBy.length !== defaultOrder.length || list.orderBy.some(
+                ({ name, asc }, index) => name !== defaultOrder[index].name || asc !== defaultOrder[index].asc
+            );
             const lines = [];
-            for (const [operation, id] of commands) {
-                if (operation !== x2ManyCommands.UPDATE) {
+            for (const [operation, id, values] of commands) {
+                if (operation !== x2ManyCommands.UPDATE || (Number.isSafeInteger(id) && id > 0)) {
                     continue;
                 }
+                const line = list._cache[id];
                 const index = list.currentIds.indexOf(id);
-                if (index !== -1) {
-                    const data = list._cache[id]?.data;
+                if (!reordered && index !== -1) {
+                    const data = line?.data;
                     lines.push({ id, position: index + 1, name: data?.display_name || data?.name });
+                } else if (line) {
+                    // Open restores the view's default order. Use the previous field values
+                    // instead of a row number from a different sort order.
+                    const names = new Set(["name", ...list.orderBy.map(({ name }) => name), ...Object.keys(values)]);
+                    const original = {};
+                    for (const name of names) {
+                        const value = line._values[name];
+                        if (name !== "id" && value !== undefined && [
+                            "char", "integer", "float", "monetary", "boolean", "selection", "date", "datetime", "many2one",
+                        ].includes(line.fields[name]?.type)) {
+                            original[name] = value;
+                        }
+                    }
+                    lines.push({ id, original: line._formatOfflineValues(original, { changes: false }) });
                 }
             }
             if (lines.length) {
