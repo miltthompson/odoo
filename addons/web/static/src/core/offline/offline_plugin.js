@@ -61,7 +61,8 @@ export class OfflinePlugin extends Plugin {
     syncPaused = signal(false);
     _queueFailure = signal(null);
     _writes = Promise.resolve();
-    _rejectedKeys = new Set();
+    // A caller may already hold a reference to an entry whose local write failed.
+    _failedWriteKeys = new Set();
     _syncAgain = false;
     _visitedUITable = computed(() =>
         this.debugMode.isActive()
@@ -293,13 +294,17 @@ export class OfflinePlugin extends Plugin {
         this._pending.set([...this._pending(), entry]);
         this._ormToSync()[entry.legacyKey] = this._compatEntry(entry);
         this._enqueueWrite(async () => {
-            if (this._hasUnsavedDependency(entry)) {
-                this._rejectedKeys.add(entry.key);
+            try {
+                if (this._hasUnsavedDependency(entry)) {
+                    throw new Error("An earlier offline change has not been saved");
+                }
+                this._replaceEntry(await this._queue.add(entry));
+                this._failedWriteKeys.delete(entry.key);
+            } catch (error) {
+                this._failedWriteKeys.add(entry.key);
                 this._removeEntry(entry.key);
-                throw new Error("An earlier offline change has not been saved");
+                throw error;
             }
-            this._replaceEntry(await this._queue.add(entry));
-            this._rejectedKeys.delete(entry.key);
         });
         return entry.legacyKey;
     }
@@ -315,17 +320,23 @@ export class OfflinePlugin extends Plugin {
         let keys;
         await this._enqueueWrite(async () => {
             const entries = calls.map((call) => this._makeEntry(call));
-            if (entries.some((entry) => this._hasUnsavedDependency(entry))) {
-                throw new Error("An earlier offline change has not been saved");
-            }
-            const saved = await this._queue.addMany(entries);
-            for (const entry of saved) {
-                this._rejectedKeys.delete(entry.key);
+            let saved;
+            try {
+                if (entries.some((entry) => this._hasUnsavedDependency(entry))) {
+                    throw new Error("An earlier offline change has not been saved");
+                }
+                saved = await this._queue.addMany(entries);
+            } catch (error) {
+                for (const entry of entries) {
+                    this._failedWriteKeys.add(entry.key);
+                }
+                throw error;
             }
             this._pending.set([...this._pending(), ...saved].sort((a, b) =>
                 (a.seq ?? Infinity) - (b.seq ?? Infinity)
             ));
             for (const entry of saved) {
+                this._failedWriteKeys.delete(entry.key);
                 const latest = this.getPendingEntry(entry.legacyKey);
                 this._ormToSync()[entry.legacyKey] = this._compatEntry(latest);
             }
@@ -372,7 +383,7 @@ export class OfflinePlugin extends Plugin {
     async waitForPendingWrite(key) {
         await this._writes;
         const entry = this._pending().find((entry) => entry.key === key);
-        return !this._rejectedKeys.has(key) && (!entry || entry.seq !== null);
+        return !this._failedWriteKeys.has(key) && (!entry || entry.seq !== null);
     }
 
     getQueueReady() {
@@ -569,7 +580,7 @@ export class OfflinePlugin extends Plugin {
     // -------------------------------------------------------------------------
 
     _hasUnsavedDependency(entry) {
-        return entry.refs.some((key) => this._rejectedKeys.has(key)) ||
+        return entry.refs.some((key) => this._failedWriteKeys.has(key)) ||
             this._pending().some((earlier) => earlier.seq === null && entry.refs.includes(earlier.key));
     }
 
@@ -587,16 +598,13 @@ export class OfflinePlugin extends Plugin {
         // when reopened. Keep that key, but send the next save as a separate write.
         const create = options.id !== undefined && method === "web_save" && !args[0]?.length &&
             this.getPendingDraftCreate(model, legacyKey);
-        if (!create && options.draftCreateValues && method === "web_save" && !args[0]?.length) {
-            args = [args[0], options.draftCreateValues, ...args.slice(2)];
-        }
         return {
             ...this._owner,
             key: options.key || window.crypto.randomUUID(),
             legacyKey,
             seq: null,
             model, method, kwargs, extras,
-            args: create ? [[`offline:${create.key}`], ...args.slice(1)] : args,
+            args: create ? [[`offline:${create.key}`], ...args.slice(1)] : options.createArgs ?? args,
             legacyArgs: create ? args : undefined,
             refs: create ? [create.key, ...(options.refs || [])] : options.refs || [],
             target: options.target || { model, ids: create ? [`offline:${create.key}`] : targetIds },
