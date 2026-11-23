@@ -133,6 +133,80 @@ test("saving after discarding an open draft queues a new create with all form va
     expect(entry.args).toEqual([[], { name: "Saved again", email: "contact@example.com" }]);
 });
 
+test("a draft discarded by another tab is recreated with its selected tags", async () => {
+    class Tag extends models.Model {
+        _records = [{ id: 6, display_name: "Priority" }];
+    }
+    class Lead extends models.Model {
+        name = fields.Char();
+        tag_ids = fields.Many2many({ relation: "tag", default: [6] });
+    }
+    defineModels([Lead, Tag]);
+    const setOffline = mockOffline();
+    await mountView({
+        type: "form", resModel: "lead",
+        arch: `<form><field name="name"/><field name="tag_ids" widget="many2many_tags"/></form>`,
+    });
+    const offline = getService(OfflinePlugin);
+    await setOffline(true);
+    await contains(".o_field_widget[name='name'] input").edit("Initial draft");
+    await contains(".o_form_button_save").click();
+    const [draft] = offline.getPendingEntries();
+    // Simulate another tab discarding it without updating this tab's snapshot.
+    await offline._queue.lock(() => offline._queue.remove(draft.key));
+    expect(offline.getPendingEntries().map(({ key }) => key)).toEqual([draft.key]);
+    expect(queryAllTexts(".o_field_many2many_tags .badge")).toEqual(["Priority"]);
+
+    await contains(".o_field_widget[name='name'] input").edit("Recreated draft");
+    await contains(".o_form_button_save").click();
+    const entries = await offline._queue.list();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].refs).toEqual([]);
+    expect(entries[0].args).toEqual([[], { name: "Recreated draft", tag_ids: [[6, false, [6]]] }]);
+});
+
+test("offline archive and delete keep the selection when storage fails", async () => {
+    class Lead extends models.Model {
+        name = fields.Char();
+        active = fields.Boolean({ default: true });
+        _records = [{ id: 1, name: "One" }];
+    }
+    defineModels([Lead, ...Object.values(webModels)]);
+    let list;
+    patchWithCleanup(DynamicList.prototype, {
+        setup() {
+            super.setup();
+            list = this;
+        },
+    });
+    const setOffline = mockOffline();
+    await mountView({ type: "list", resModel: "lead", arch: `<list><field name="name"/></list>` });
+    const offline = getService(OfflinePlugin);
+    let fail = true;
+    patchWithCleanup(offline._queue, {
+        async addMany(entries) {
+            if (fail) {
+                throw new Error("Storage is full");
+            }
+            return super.addMany(entries);
+        },
+    });
+    await setOffline(true);
+    const [lead] = list.records;
+    lead.toggleSelection(true);
+    expect(await list.archive(true)).toBe(false);
+    expect(await list._deleteRecords([lead])).toBe(false);
+    expect(lead.selected).toBe(true);
+    expect(await offline._queue.list()).toEqual([]);
+
+    fail = false;
+    expect(await list.archive(true)).toBe(true);
+    expect(lead.selected).toBe(false);
+    expect((await offline._queue.list()).map(({ method, args }) => [method, args])).toEqual([
+        ["action_archive", [[1]]],
+    ]);
+});
+
 test("local storage rejects chains referencing a failed queue write", async () => {
     await makeTestApp();
     const offline = getService(OfflinePlugin);
