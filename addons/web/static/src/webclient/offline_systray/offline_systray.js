@@ -275,6 +275,12 @@ class OfflineSystray extends Component {
             return;
         }
         let resId = this.getRecordId(entry);
+        // Preserve the original row activation when the blank form is cached. The
+        // explicit Open button can open an offline ID directly without that cache.
+        if (!exact && entry.createdId === resId && isOfflineRecordId(resId) &&
+            this.offlinePlugin.isAvailableOffline(entry.extras.actionId, "form", false)) {
+            resId = undefined;
+        }
         if (isOfflineRecordId(resId) && !this.offlinePlugin.getRecordReference(entry.model, resId)) {
             const resolved = await this.offlinePlugin.resolveOfflineRecord(entry.model, resId);
             if (!resolved) {
