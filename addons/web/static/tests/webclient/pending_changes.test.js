@@ -168,6 +168,9 @@ test("Open shows a follow-up save for an unsent draft while offline", async () =
     await mountWithCleanup(WebClient);
     await getService("action").doAction(5);
     await waitFor(".o_form_view");
+    // The fallback opens the cached new-record form with resId explicitly unset.
+    // Keep the mock default lookup available for that action configuration.
+    onRpc("pending.contact", "onchange", () => ({ value: { name: false } }));
     await setOffline(true);
     const offline = getService(OfflinePlugin);
     const base = { actionId: 5, viewType: "form" };

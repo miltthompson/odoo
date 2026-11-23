@@ -14,7 +14,8 @@ $o-offline-separator-color: invert($popover-bg, 10%) !default;
 }
 
 .o_offline_systray_content {
-    width: min(24rem, 100vw);
+    width: 24rem;
+    max-width: 100vw;
 
     .o_offline_pending_item {
         display: grid;
