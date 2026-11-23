@@ -380,6 +380,59 @@ test("discarding an old rejected draft does not resend its invalid payload", asy
     expect(await offline._queue.list()).toEqual([]);
 });
 
+test("a failed discard cannot leave a marker for a draft that can still replay", async () => {
+    const setOffline = mockOffline();
+    await makeTestApp();
+    await setOffline(true);
+    const offline = getService(OfflinePlugin);
+    await offline.scheduleORMDurably("res.partner", "web_save", [[], { name: "Queued" }], {});
+    const [create] = await offline._queue.list();
+    patchWithCleanup(IDBObjectStore.prototype, {
+        delete(key) {
+            if (this.name === "entries" && key === create.key) {
+                throw new Error("Could not delete the queue row");
+            }
+            return super.delete(key);
+        },
+    });
+    await offline.discardPendingChange(create.key);
+    expect(offline.getQueueError()).toBeTruthy();
+    expect(await offline._queue.wasDraftDiscarded(create.key)).toBe(undefined);
+    expect((await offline._queue.get(create.key)).args).toEqual(create.args);
+});
+
+test("discarding an expired receipt recovery does not mark its original create unsent", async () => {
+    mockDate("2026-01-01T12:00:00");
+    const sent = [];
+    onRpc("/web/offline/sync", async (request) => {
+        sent.push((await request.json()).params);
+        return sent.length === 2 ? { already_applied: true, created_ids: [47] } : [{ id: 47 }];
+    });
+    const setOffline = mockOffline();
+    await makeTestApp();
+    const offline = getService(OfflinePlugin);
+    const id = await offline.scheduleORMDurably("res.partner", "web_save", [[], { name: "Original" }], {});
+    const [original] = await offline._queue.list();
+    await offline.syncPendingChanges();
+    mockDate("2026-02-02T12:00:00");
+    await setOffline(true);
+    const saveEdit = (name) => offline.scheduleORMDurably("res.partner", "web_save", [[], { name }], {}, {
+        id, draftCreate: original,
+    });
+    await saveEdit("Discard this edit");
+    const [recovery, dependentEdit] = await offline._queue.list();
+    expect(recovery.key).toBe(original.key);
+    await offline.discardPendingChange(recovery.key);
+    await offline.discardPendingChange(dependentEdit.key);
+    await saveEdit("Keep this edit");
+    await setOffline(false);
+    await offline.syncPendingChanges();
+    expect(sent).toHaveLength(3);
+    expect(sent[1]).toEqual(sent[0]);
+    expect(sent[2].args).toEqual([[`offline:${original.key}`], { name: "Keep this edit" }]);
+    expect(await offline._queue.list()).toEqual([]);
+});
+
 test("a draft whose original key is lost is kept for manual recovery", async () => {
     class Lead extends models.Model {
         name = fields.Char();

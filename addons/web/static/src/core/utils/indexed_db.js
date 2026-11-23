@@ -126,6 +126,31 @@ export class IndexedDB {
         );
     }
 
+    /** Put a value and delete a row in one transaction. */
+    async writeAndDelete(table, key, value, deleteTable, deleteKey) {
+        this._tables.add(table);
+        this._tables.add(deleteTable);
+        return this.mutex.exec(() => this._execute((db) => {
+            if (!db) {
+                return;
+            }
+            return new Promise((resolve, reject) => {
+                const transaction = db.transaction([table, deleteTable], "readwrite", { durability: this.durability });
+                transaction.oncomplete = resolve;
+                transaction.onerror = (event) => reject(event.target.error);
+                transaction.onabort = () => reject(transaction.error || new Error("IndexedDB transaction aborted"));
+                try {
+                    transaction.objectStore(table).put(value, key);
+                    transaction.objectStore(deleteTable).delete(deleteKey);
+                    transaction.commit();
+                } catch (error) {
+                    transaction.abort();
+                    reject(error);
+                }
+            });
+        }));
+    }
+
     /**
      * Delete data from the given table
      *

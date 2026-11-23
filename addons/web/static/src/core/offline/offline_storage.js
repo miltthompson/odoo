@@ -127,11 +127,6 @@ export class OfflineQueueStore {
         await this.db.write(ENTRIES, values);
     }
 
-    recordDraftDiscard(key) {
-        // Keep just the UUID marker: another tab may keep the draft open past receipt expiry.
-        return this.db.write(QUEUE_META, `discarded:${key}`, true);
-    }
-
     wasDraftDiscarded(key) {
         return this.db.read(QUEUE_META, `discarded:${key}`);
     }
@@ -172,8 +167,13 @@ export class OfflineQueueStore {
         return updates;
     }
 
-    async remove(key) {
-        await this.db.delete(ENTRIES, key);
+    async remove(key, { discardedDraft = false } = {}) {
+        if (discardedDraft) {
+            // Keep just the UUID marker, and never commit it while the draft can still replay.
+            await this.db.writeAndDelete(QUEUE_META, `discarded:${key}`, true, ENTRIES, key);
+        } else {
+            await this.db.delete(ENTRIES, key);
+        }
         if (!(await this.db.getAllKeys(ENTRIES))?.length) {
             const retain = new Set();
             for (const { key, value } of (await this.db.getAllEntries(RESOLVED_RECORDS)) || []) {
