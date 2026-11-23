@@ -340,7 +340,11 @@ export class OfflinePlugin extends Plugin {
                 if (recovery) {
                     // Resend the original payload and UUID. The server keeps the receipt even
                     // after the browser forgets it; the new edit is a separate dependent write.
-                    recoveries.set(original.key, { ...original, seq: null, state: "waiting", error: null });
+                    recoveries.set(original.key, {
+                        ...original, seq: null, state: "waiting", error: null,
+                        // A stale form can still have the original never-sent snapshot.
+                        draftSent: true, draftRejected: false,
+                    });
                 }
                 return this._makeEntry({
                     ...call,
@@ -446,10 +450,7 @@ export class OfflinePlugin extends Plugin {
         await this._enqueueWrite(async () => {
             const entry = await this._queue.get(key);
             if (entry?.state !== "sending") {
-                if (entry?.draftSent === false || entry?.draftRejected) {
-                    await this._queue.recordDraftDiscard(key);
-                }
-                await this._queue.remove(key);
+                await this._queue.remove(key, { discardedDraft: entry?.draftSent === false || entry?.draftRejected });
                 this._removeEntry(key);
             }
         });
