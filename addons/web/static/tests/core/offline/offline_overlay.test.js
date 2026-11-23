@@ -418,6 +418,55 @@ test("saving an open local record after its receipt expires reuses the original 
     expect(await offline._queue.list()).toEqual([]);
 });
 
+test("saving an aged temporary record after discard does not resurrect its create", async () => {
+    mockDate("2026-01-01T12:00:00");
+    const model = await mountOverlayView("form", `<field name="name"/>`);
+    const record = model.root;
+    const offline = getService(OfflinePlugin);
+    onRpc("/web/offline/sync", () => expect.step("unexpected replay"));
+    onRpc("web_save", () => expect.step("unexpected direct write"));
+    await record.update({ name: "Discarded draft" });
+    expect(await record._offlineSave()).toBe(true);
+    expect(isOfflineRecordId(record.resId)).toBe(true);
+    const [create] = offline.getPendingEntries();
+    mockDate("2026-02-02T12:00:00");
+    await offline.discardPendingChange(create.key);
+    await record.update({ name: "Keep this edit" });
+    expect(await record.save()).toBe(false);
+    expect(record.data.name).toBe("Keep this edit");
+    expect(await offline._queue.list()).toEqual([]);
+    expect.verifySteps([]);
+});
+
+test("opening an exact rejected edit to the server ID preserves replay order", async () => {
+    const model = await mountOverlayView("form", `<field name="name"/>`, 1);
+    const offline = getService(OfflinePlugin);
+    model.root._applyChanges({ name: "Rejected edit" });
+    expect(await model.root._offlineSave()).toBe(true);
+    const [entry] = offline.getPendingEntries();
+    expect(entry.args[0]).toEqual([1]);
+    expect(entry.resolvedResId).toBe(undefined);
+    await offline._queue.lock(() => offline._storeState(entry, "needs_attention", "Not applied"));
+    onRpc("web_save", () => expect.step("unexpected direct write"));
+    onRpc("/web/offline/sync", () => expect.step("unexpected replay"));
+    await model.root.setOfflineChanges(entry.key);
+    expect(model.root.data.name).toBe("Rejected edit");
+    let sync;
+    patchWithCleanup(offline, {
+        syncPendingChanges() {
+            sync = super.syncPendingChanges();
+            return sync;
+        },
+    });
+    await model.root.update({ name: "Queued behind the rejection" });
+    expect(await model.root.save()).toBe(true);
+    await sync;
+    const [, correction] = await offline._queue.list();
+    expect(correction.state).toBe("held_back");
+    expect(correction.args).toEqual([[1], { name: "Queued behind the rejection" }]);
+    expect.verifySteps([]);
+});
+
 test("a temporary parent keeps line edits out of replay and preserves them for reapplication", async () => {
     const setOffline = mockOffline();
     const model = await mountOverlayView("form", `<field name="name"/>
