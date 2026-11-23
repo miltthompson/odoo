@@ -134,6 +134,56 @@ test("Open targets the saved record when a follow-up draft edit is rejected", as
     expect.verifySteps([[5, "form", 47, edit.key]]);
 });
 
+test("a new edit to a synced draft waits behind a rejected edit to the same record", async () => {
+    const sent = [];
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        const { name } = params.args[1];
+        sent.push(name);
+        return name === "Rejected edit"
+            ? new Response(JSON.stringify({ error: { code: 0, data: { name: "odoo.exceptions.AccessError" } } }))
+            : [{ id: 47 }];
+    });
+    await mountWithCleanup(WebClient);
+    await runAllTimers();
+    const offline = getService(OfflinePlugin);
+    const draft = offline.scheduleORM("res.partner", "web_save", [[], { name: "Draft" }], {});
+    offline.scheduleORM("res.partner", "web_save", [[], { name: "Rejected edit" }], {}, { id: draft });
+    await offline._syncORM();
+    offline.scheduleORM("res.partner", "web_save", [[47], { name: "Later edit" }], {});
+    await offline._syncORM();
+    expect(sent).toEqual(["Draft", "Rejected edit"]);
+    expect((await offline._queue.list()).map(({ state }) => state)).toEqual(["needs_attention", "held_back"]);
+});
+
+test("Open shows a follow-up save for an unsent draft while offline", async () => {
+    class PendingContact extends models.Model {
+        _name = "pending.contact";
+        name = fields.Char();
+        _views = { "form,false": '<form><field name="name" readonly="1"/></form>' };
+    }
+    defineModels([PendingContact, ...Object.values(webModels)]);
+    defineActions([{ id: 5, res_model: "pending.contact", views: [[false, "form"]] }]);
+    const setOffline = mockOffline();
+    await mountWithCleanup(WebClient);
+    await getService("action").doAction(5);
+    await waitFor(".o_form_view");
+    await setOffline(true);
+    const offline = getService(OfflinePlugin);
+    const base = { actionId: 5, viewType: "form" };
+    const draft = offline.scheduleORM("pending.contact", "web_save", [[], { name: "Draft" }], {}, {
+        extras: { ...base, changes: { name: "Draft" } },
+    });
+    offline.scheduleORM("pending.contact", "web_save", [[], { name: "Updated draft" }], {}, {
+        id: draft, extras: { ...base, changes: { name: "Updated draft" } },
+    });
+    await offline.waitForPendingWrite(offline.getPendingEntry(draft).key);
+    await contains(".o_offline_systray").click();
+    expect(".o_offline_pending_item button:contains(Open)").toHaveCount(2);
+    await contains(".o_offline_pending_item button:contains(Open):last").click();
+    await waitFor(".o_form_view .o_field_widget[name='name']:contains(Updated draft)");
+});
+
 test("session expiry is announced without opening the pending-changes panel", async () => {
     onRpc("/web/offline/sync", () => new Response(JSON.stringify({ error: {
         code: 100,

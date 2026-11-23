@@ -128,7 +128,14 @@ export class OfflineQueueStore {
     async rememberDraftRecord(key, model, id) {
         const updates = (await this.list())
             .filter((entry) => entry.model === model && entry.legacyArgs && entry.refs.includes(key))
-            .map((entry) => ({ ...entry, resolvedResId: id }));
+            .map((entry) => ({
+                ...entry,
+                resolvedResId: id,
+                target: {
+                    ...entry.target,
+                    ids: entry.target.ids.map((targetId) => targetId === `offline:${key}` ? id : targetId),
+                },
+            }));
         if (updates.length) {
             await this._writeEntries(updates);
         }

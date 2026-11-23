@@ -187,10 +187,12 @@ class OfflineSystray extends Component {
 
     isClickable(value) {
         const resId = value.resolvedResId ?? (value.legacyArgs || value.args)[0]?.[0] ?? false;
+        const draft = value.legacyArgs && !value.resolvedResId &&
+            this.offlinePlugin.getPendingDraftCreate(value.model, value.legacyKey);
         return (
             value.method === "web_save" &&
             value.extras?.viewType === "form" &&
-            (!value.legacyArgs || Boolean(value.resolvedResId)) &&
+            (!value.legacyArgs || value.resolvedResId || (draft && value.refs.includes(draft.key))) &&
             (!this.offlinePlugin.isOffline() ||
                 this.offlinePlugin.isAvailableOffline(value.extras.actionId, "form", resId))
         );
@@ -267,7 +269,7 @@ class OfflineSystray extends Component {
         if (!this.isClickable(entry)) {
             return;
         }
-        const resId = entry.resolvedResId ?? entry.args[0]?.[0];
+        const resId = entry.resolvedResId ?? (entry.legacyArgs || entry.args)[0]?.[0];
         const siblings = this.offlinePlugin.getPendingEntries().filter((item) => item.legacyKey === entry.legacyKey);
         await this.actionService.doAction(entry.extras.actionId, {
             viewType: "form",
