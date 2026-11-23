@@ -18,6 +18,8 @@ import {
     parseServerValue,
 } from "./utils";
 
+const LOAD_NEXT_RECORD = Symbol("load next record");
+
 /**
  * Redefine default 'Record' type
  * TODO: rename 'Record' to 'RelationalRecord'?
@@ -299,7 +301,13 @@ export class Record extends DataPoint {
      */
     async save(options) {
         await this.model._askChanges();
-        return this.model.mutex.exec(() => this._save(options));
+        const result = await this.model.mutex.exec(() => this._save(options));
+        if (result === LOAD_NEXT_RECORD) {
+            // onRootLoaded can take the mutex to restore the destination's queued edits.
+            await this.model.load({ resId: options.nextId });
+            return true;
+        }
+        return result;
     }
 
     /**
@@ -1311,7 +1319,7 @@ export class Record extends DataPoint {
         const recoveryReason = this._getDraftRecoveryReason(changes);
         if ((!creation || this._offlineId) && !Object.keys(changes).length) {
             if (nextId) {
-                return this.model.load({ resId: nextId });
+                return LOAD_NEXT_RECORD;
             }
             // toRaw to prevent effect
             this._changes = markRaw({});
@@ -1379,10 +1387,7 @@ export class Record extends DataPoint {
             } else if (saved && pendingDraft) {
                 offline.syncPendingChanges();
             }
-            if (saved && nextId) {
-                await this.model.load({ resId: nextId });
-            }
-            return saved;
+            return saved && nextId ? LOAD_NEXT_RECORD : saved;
         }
         // Reload a replayed draft to replace browser-only line IDs with their server IDs.
         reload ||= replayedDraft;
