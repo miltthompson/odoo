@@ -407,6 +407,56 @@ test("the legacy form entry for a rejected follow-up uses the replayed record ID
     expect(offline._ormToSync()[draft].value.args).toEqual([[47], { name: "Later" }]);
 });
 
+test("reopening a rejected draft follow-up keeps later saves in replay order", async () => {
+    class Lead extends models.Model {
+        name = fields.Char();
+        _records = [{ id: 47, name: "Draft" }];
+    }
+    defineModels([Lead]);
+    let record;
+    patchWithCleanup(Record.prototype, {
+        setup() {
+            super.setup(...arguments);
+            record = this;
+        },
+    });
+    onRpc("web_save", () => expect.step("unexpected direct write"));
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        return params.refs.length ? rejection(0, "odoo.exceptions.AccessError") : [{ id: 47 }];
+    });
+    await mountView({ type: "form", resModel: "lead", resId: 47, arch: '<form><field name="name"/></form>' });
+    const offline = getService(OfflinePlugin);
+    const id = offline.scheduleORM("lead", "web_save", [[], { name: "Draft" }], {});
+    const change = { name: "Rejected edit" };
+    offline.scheduleORM("lead", "web_save", [[], change], {}, { id, extras: { changes: change } });
+    await offline._syncORM();
+    await record.setOfflineChanges(id);
+    await contains(".o_field_widget[name='name'] input").edit("Later edit");
+    await contains(".o_form_button_save").click();
+    await offline.syncPendingChanges();
+    const [rejected, later] = await offline._queue.list();
+    expect(rejected.state).toBe("needs_attention");
+    expect(later.args).toEqual([[47], { name: "Later edit" }]);
+    expect(later.state).toBe("held_back");
+    expect.verifySteps([]);
+});
+
+test("an old draft label does not make a newly queued replacement eligible for recovery", async () => {
+    mockDate("2026-02-02T12:00:00");
+    await makeTestApp();
+    const offline = getService(OfflinePlugin);
+    const id = await offline.scheduleORMDurably("res.partner", "web_save", [[], { name: "Replacement" }], {}, {
+        extras: { timeStamp: Date.parse("2026-01-01T12:00:00") },
+    });
+    const create = offline.getPendingEntry(id);
+    const setOffline = mockOffline();
+    await setOffline(true);
+    await offline.discardPendingChange(create.key);
+    expect((await offline.getDraftSaveState("res.partner", create)).recover).toBe(false);
+    expect(await offline._queue.list()).toEqual([]);
+});
+
 test("a successful draft replay records the server ID before removing the create", async () => {
     onRpc("/web/offline/sync", () => ({ already_applied: true, created_ids: [47] }));
     await makeTestApp();
