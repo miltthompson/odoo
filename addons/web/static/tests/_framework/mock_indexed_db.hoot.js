@@ -77,6 +77,14 @@ export function mockIndexedDBFactory(name, { fn }) {
                 });
             }
 
+            async writeAndDelete(table, key, value, deleteTable, deleteKey) {
+                return this.mutex.exec(() => {
+                    const db = dbs[this.name];
+                    (db[table] ||= {})[key] = value;
+                    delete db[deleteTable]?.[deleteKey];
+                });
+            }
+
             async deleteDatabase() {
                 return this.mutex.exec(() => (dbs[this.name] = {}));
             }
