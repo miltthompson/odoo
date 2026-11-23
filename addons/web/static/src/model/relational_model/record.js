@@ -414,7 +414,7 @@ export class Record extends DataPoint {
                 // A compatibility link can still open the cached blank form.
                 this.config.resId = entry.createdId;
                 this.config.resIds = [entry.createdId];
-            } else if (!this.resId) {
+            } else if (this.isNew) {
                 this._offlineDraftKey = this.model.offlinePlugin.getPendingDraftCreate(
                     this.resModel, this._offlineId
                 )?.key;
@@ -1263,14 +1263,26 @@ export class Record extends DataPoint {
             this.model._closeUrgentSaveNotification();
         }
         const offline = this.model.offlinePlugin;
-        const syncedId = !this.resId && offline.getSyncedDraftId(this._offlineDraftKey);
-        if (syncedId) {
-            const resIds = [...new Set([...this.resIds, syncedId])];
-            this.model._updateConfig(this.config, { resId: syncedId, resIds }, { reload: false });
+        const urgent = this.model._urgentSave && this.model.useSendBeaconToSaveUrgently &&
+            !this.model.env.inDialog;
+        let pendingDraft = false;
+        if (this._offlineDraftKey) {
+            if (urgent) {
+                // A beacon can't safely wait for the queue or preserve its ordering.
+                pendingDraft = true;
+            } else {
+                const state = await offline.getDraftSaveState(this.resModel, this._offlineDraftKey);
+                if (!state) {
+                    return false;
+                }
+                if (state.resId && !this.resId) {
+                    const resIds = [...new Set([...this.resIds, state.resId])];
+                    this.model._updateConfig(this.config, { resId: state.resId, resIds }, { reload: false });
+                }
+                pendingDraft = state.pending;
+            }
         }
         const creation = !this.resId;
-        const pendingDraft = creation && this._offlineDraftKey &&
-            offline.getPendingDraftCreate(this.resModel, this._offlineId)?.key === this._offlineDraftKey;
         if (nextId) {
             if (creation) {
                 throw new Error("Cannot set nextId on a new record");
@@ -1299,11 +1311,7 @@ export class Record extends DataPoint {
             this.dirty = false;
             return true;
         }
-        if (
-            this.model._urgentSave &&
-            this.model.useSendBeaconToSaveUrgently &&
-            !this.model.env.inDialog
-        ) {
+        if (urgent) {
             // There isn't time to persist offline changes during page unload.
             const localRecord = pendingDraft || isOfflineRecordId(this.resId);
             if (localRecord || offline.isOffline()) {
@@ -1381,7 +1389,11 @@ export class Record extends DataPoint {
             next_id: nextId,
         };
         if (isOfflineRecordId(this.resId)) {
-            return this._offlineSave();
+            const saved = await this._offlineSave();
+            if (saved) {
+                offline.syncPendingChanges();
+            }
+            return saved;
         }
         let records = [];
         try {
@@ -1482,7 +1494,7 @@ export class Record extends DataPoint {
             kwargs: { context: this.context },
             options: {
                 refs: reference.key ? [reference.key] : [],
-                target: { model: this.resModel, ids: [this.resId] },
+                target: { model: this.resModel, ids: [reference.key ? this.resId : reference.value] },
                 extras: {
                     ...getScheduleORMExtras(this.model, [this]),
                     overlayBefore: this._offlineOverlayValues(this._values),

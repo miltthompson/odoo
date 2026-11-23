@@ -178,6 +178,57 @@ test("a draft discarded by another tab is recreated with its selected tags", asy
     expect(entries[0].args).toEqual([[], { name: "Recreated draft", tag_ids: [[6, false, [6]]] }]);
 });
 
+test("an offline save uses the create receipt persisted by another tab", async () => {
+    class Lead extends models.Model {
+        name = fields.Char();
+        email = fields.Char();
+    }
+    defineModels([Lead]);
+    let record;
+    patchWithCleanup(Record.prototype, {
+        setup() {
+            super.setup(...arguments);
+            record = this;
+        },
+    });
+    const setOffline = mockOffline();
+    await mountView({
+        type: "form", resModel: "lead", arch: `<form><field name="name"/><field name="email"/></form>`,
+    });
+    const offline = getService(OfflinePlugin);
+    const changes = { name: "Draft", email: "initial@example.com" };
+    const [draftId] = await offline.scheduleORMBatch([{
+        model: "lead", method: "web_save", args: [[], changes], kwargs: {},
+        options: { extras: { changes } },
+    }]);
+    const [draft] = offline.getPendingEntries();
+    await record.setOfflineChanges(draftId);
+    await setOffline(true);
+    await offline._queue.lock(async () => {
+        await offline._queue.recordResolution("lead", draft.key, draft.key, 47);
+        await offline._queue.remove(draft.key);
+    });
+    expect(offline.getPendingEntries().map(({ key }) => key)).toEqual([draft.key]);
+
+    record._applyChanges({ name: "Later edit" });
+    expect(await record._offlineSave()).toBe(true);
+    const [entry] = await offline._queue.list();
+    expect(entry.args).toEqual([[47], { name: "Later edit" }]);
+    expect(entry.refs).toEqual([]);
+    expect(entry.target.ids).toEqual([47]);
+});
+
+test("a successful draft replay records the server ID before removing the create", async () => {
+    onRpc("/web/offline/sync", () => ({ already_applied: true, created_ids: [47] }));
+    await makeTestApp();
+    const offline = getService(OfflinePlugin);
+    const id = offline.scheduleORM("res.partner", "web_save", [[], { name: "Earlier draft" }], {});
+    const { key } = offline.getPendingEntry(id);
+    await offline._syncORM();
+    expect(await offline._queue.resolveRecord("res.partner", key)).toEqual({ id: 47, key });
+    expect(await offline._queue.list()).toEqual([]);
+});
+
 test("offline archive and delete keep the selection when storage fails", async () => {
     class Lead extends models.Model {
         name = fields.Char();

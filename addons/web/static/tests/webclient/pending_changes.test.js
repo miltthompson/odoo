@@ -1,10 +1,11 @@
 import { animationFrame, expect, press, queryAllTexts, queryOne, runAllTimers, test, waitFor } from "@odoo/hoot";
 import { offlineRecordId } from "@web/core/offline/offline_id";
 import { OfflinePlugin } from "@web/core/offline/offline_plugin";
+import { Record } from "@web/model/relational_model/record";
 import { WebClient } from "@web/webclient/webclient";
 import {
     contains, defineActions, defineModels, fields, getService, mockOffline, models,
-    mountWithCleanup, onRpc, patchWithCleanup, webModels,
+    mountView, mountWithCleanup, onRpc, patchWithCleanup, webModels,
 } from "@web/../tests/web_test_helpers";
 
 function schedule(offline, id, label, timeStamp) {
@@ -265,6 +266,57 @@ test("saving an opened draft after replay updates the synced record", async () =
     await contains('.o_field_widget[name="name"] input').edit("Post-replay edit");
     await contains(".o_form_button_save").click();
     expect.verifySteps([[[47], { name: "Post-replay edit" }]]);
+});
+
+test("an online save from an open draft waits behind its rejected follow-up", async () => {
+    class Lead extends models.Model {
+        name = fields.Char();
+    }
+    defineModels([Lead]);
+    let form;
+    patchWithCleanup(Record.prototype, {
+        setup() {
+            super.setup(...arguments);
+            form = this;
+        },
+    });
+    onRpc("web_save", () => expect.step("unexpected direct write"));
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        const name = params.args[1].name;
+        expect.step(name);
+        return name === "Initial"
+            ? [{ id: 47 }]
+            : new Response(JSON.stringify({ error: { code: 200, data: { name: "odoo.exceptions.AccessError" } } }));
+    });
+    await mountView({ type: "form", resModel: "lead", arch: `<form><field name="name"/></form>` });
+    const offline = getService(OfflinePlugin);
+    const draft = offline.scheduleORM("lead", "web_save", [[], { name: "Initial" }], {}, {
+        extras: { changes: { name: "Initial" } },
+    });
+    offline.scheduleORM("lead", "web_save", [[], { name: "Rejected follow-up" }], {}, {
+        id: draft, extras: { changes: { name: "Rejected follow-up" } },
+    });
+    await offline.waitForPendingWrite(offline.getPendingEntry(draft).key);
+    const followUp = offline.getPendingEntry(draft);
+    await form.setOfflineChanges(followUp.key);
+    await offline._syncORM();
+    expect.verifySteps(["Initial", "Rejected follow-up"]);
+
+    let sync;
+    patchWithCleanup(offline, {
+        syncPendingChanges() {
+            sync = super.syncPendingChanges();
+            return sync;
+        },
+    });
+    form._applyChanges({ name: "Latest" });
+    expect(await form._save()).toBe(true);
+    await sync;
+    expect.verifySteps([]);
+    const entries = await offline._queue.list();
+    expect(entries.map(({ state }) => state)).toEqual(["needs_attention", "held_back"]);
+    expect(entries[1].args).toEqual([[47], { name: "Latest" }]);
 });
 
 test("session expiry is announced without opening the pending-changes panel", async () => {

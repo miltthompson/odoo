@@ -325,6 +325,67 @@ test("bulk archive on a stale local row sends immediately and blocks later serve
     expect((await offline._queue.list()).map(({ state }) => state)).toEqual(["needs_attention", "held_back"]);
 });
 
+test("an archive already queued when its create replays blocks a later server-ID edit", async () => {
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        expect.step([params.method, params.args[0]]);
+        return params.method === "web_save" && !params.args[0].length
+            ? [{ id: 47 }]
+            : new Response(JSON.stringify({ error: { code: 200, data: { name: "odoo.exceptions.AccessError" } } }));
+    });
+    const model = await mountOverlayView("list", `<field name="name"/><field name="active"/>`);
+    const offline = getService(OfflinePlugin);
+    const key = window.crypto.randomUUID();
+    const localId = offlineRecordId(key);
+    await offline.scheduleORMBatch([{
+        model: "lead", method: "web_save", args: [[], { name: "Draft" }], kwargs: {},
+        options: { key, createdId: localId },
+    }]);
+    model.root._setData({ records: [{ id: localId, name: "Draft", active: true }], length: 1 });
+    model.root.records[0]._toggleSelection(true);
+    expect(await model.root._toggleArchive(true, true)).toBe(true);
+    await offline._syncORM();
+    expect.verifySteps([["web_save", []], ["action_archive", [`offline:${key}`]]]);
+    const [archive] = await offline._queue.list();
+    expect(archive.target.ids).toEqual([47]);
+    expect(archive.state).toBe("needs_attention");
+
+    await offline.scheduleORMDurably("lead", "web_save", [[47], { name: "Later" }], {});
+    await offline._syncORM();
+    expect.verifySteps([]);
+    expect((await offline._queue.list()).map(({ state }) => state)).toEqual(["needs_attention", "held_back"]);
+});
+
+test("saving a dirty local form after its create replayed syncs the edit immediately", async () => {
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        expect.step(params.args);
+        return [{ id: 47 }];
+    });
+    const model = await mountOverlayView("form", `<field name="name"/>`);
+    const offline = getService(OfflinePlugin);
+    const record = model.root;
+    record._applyChanges({ name: "Draft" });
+    expect(await record._offlineSave()).toBe(true);
+    record._applyChanges({ name: "Later edit" });
+    record.dirty = true;
+    await offline._syncORM();
+    expect.verifySteps([[[], { name: "Draft" }]]);
+    expect(isOfflineRecordId(record.resId)).toBe(true);
+
+    let sync;
+    patchWithCleanup(offline, {
+        syncPendingChanges() {
+            sync = super.syncPendingChanges();
+            return sync;
+        },
+    });
+    expect(await record._save()).toBe(true);
+    await sync;
+    expect.verifySteps([[[47], { name: "Later edit" }]]);
+    expect(offline.getPendingEntries()).toEqual([]);
+});
+
 test("opening an unrelated save preserves cached one2many child data", async () => {
     const setOffline = mockOffline();
     const model = await mountOverlayView("form", `<field name="name"/>
