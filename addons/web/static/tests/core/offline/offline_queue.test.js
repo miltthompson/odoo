@@ -11,8 +11,8 @@ import {
     onRpc, patchWithCleanup, webModels,
 } from "@web/../tests/web_test_helpers";
 
-function rejection(code, name) {
-    return new Response(JSON.stringify({ error: { code, data: { name } } }), {
+function rejection(code, name, data) {
+    return new Response(JSON.stringify({ error: { code, data: { name, ...data } } }), {
         headers: { "Content-Type": "application/json" },
     });
 }
@@ -357,7 +357,9 @@ test("discarding an old rejected draft does not resend its invalid payload", asy
     onRpc("/web/offline/sync", async (request) => {
         const { params } = await request.json();
         sent.push(params);
-        return params.args[1].name === "Invalid" ? rejection(0, "odoo.exceptions.ValidationError") : [{ id: 47 }];
+        return params.args[1].name === "Invalid"
+            ? rejection(0, "odoo.exceptions.ValidationError", { offline_replay_rolled_back: true })
+            : [{ id: 47 }];
     });
     await makeTestApp();
     const offline = getService(OfflinePlugin);
@@ -375,6 +377,38 @@ test("discarding an old rejected draft does not resend its invalid payload", asy
     expect(sent.map(({ args }) => args[1].name)).toEqual(["Invalid", "Corrected"]);
     expect(sent[1].key).not.toBe(original.key);
     expect(await offline._queue.list()).toEqual([]);
+});
+
+test("a rejected draft without rollback confirmation retains its create key", async () => {
+    mockDate("2026-01-01T12:00:00");
+    const sent = [];
+    onRpc("/web/offline/sync", async (request) => {
+        sent.push((await request.json()).params);
+        return rejection(0, "odoo.exceptions.ValidationError", { message: "Post-commit error" });
+    });
+    await makeTestApp();
+    const offline = getService(OfflinePlugin);
+    const originalArgs = [[], { name: "Potentially created" }];
+    const id = await offline.scheduleORMDurably("res.partner", "web_save", originalArgs, {});
+    const [original] = await offline._queue.list();
+    await offline.syncPendingChanges();
+    mockDate("2026-02-02T12:00:00");
+    await offline.discardPendingChange(original.key);
+    expect((await offline._queue.get(original.key)).state).toBe("needs_attention");
+    expect(await offline._queue.wasDraftDiscarded(original.key)).toBe(undefined);
+
+    const updatedArgs = [[], { name: "Corrected" }];
+    await offline.scheduleORMDurably("res.partner", "web_save", updatedArgs, {}, {
+        id, draftCreate: original, createArgs: updatedArgs,
+    });
+    await offline.retryPendingChange(original.key);
+    expect(sent.map(({ key, args }) => [key, args])).toEqual([
+        [original.key, originalArgs], [original.key, originalArgs],
+    ]);
+    const [create, edit] = await offline._queue.list();
+    expect(create.state).toBe("needs_attention");
+    expect(edit.args).toEqual([[`offline:${original.key}`], { name: "Corrected" }]);
+    expect(edit.state).toBe("held_back");
 });
 
 test("a failed discard cannot leave a marker for a draft that can still replay", async () => {

@@ -54,7 +54,7 @@
                                     </span>
                                 </div>
                                 <button t-if="element.retryKey" class="btn btn-link p-0 ms-1" data-available-offline="" t-on-click.stop="() => this.offlinePlugin.retryPendingChange(element.retryKey)">Retry</button>
-                                <div>
+                                <div t-if="element.discardable">
                                     <button
                                         class="oi oi-filled btn btn-link text-danger py-0" data-icon="delete"
                                         title="Discard offline changes"
