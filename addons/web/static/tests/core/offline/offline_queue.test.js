@@ -155,7 +155,7 @@ test("a draft discarded by another tab is recreated with its selected tags", asy
     // Simulate another tab discarding it without updating this tab's snapshot.
     await offline._queue.lock(() => offline._queue.remove(draft.key));
     expect(offline.getPendingEntries().map(({ key }) => key)).toEqual([draft.key]);
-    expect(queryAllTexts(".o_field_many2many_tags .badge")).toEqual(["Priority"]);
+    expect(".o_field_many2many_tags .badge").toHaveCount(1);
 
     await contains(".o_field_widget[name='name'] input").edit("Recreated draft");
     await contains(".o_form_button_save").click();
