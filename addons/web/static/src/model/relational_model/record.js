@@ -1254,6 +1254,9 @@ export class Record extends DataPoint {
                     this.model._updateConfig(this.config, { resId: state.resId, resIds }, { reload: false });
                 }
                 pendingDraft = state.pending;
+                if (state.resId && !pendingDraft) {
+                    this._offlineDraftKey = undefined;
+                }
             }
         }
         const creation = !this.resId;
