@@ -2,6 +2,7 @@ import { animationFrame, expect, mockDate, queryAllTexts, test } from "@odoo/hoo
 import { makeErrorFromResponse } from "@web/core/network/rpc";
 import { OfflinePlugin } from "@web/core/offline/offline_plugin";
 import { OfflineQueueStore } from "@web/core/offline/offline_storage";
+import { _OriginalIndexedDB as RealIndexedDB } from "@web/core/utils/indexed_db";
 import { DynamicGroupList } from "@web/model/relational_model/dynamic_group_list";
 import { DynamicList } from "@web/model/relational_model/dynamic_list";
 import { Record } from "@web/model/relational_model/record";
@@ -385,20 +386,26 @@ test("a failed discard cannot leave a marker for a draft that can still replay",
     await makeTestApp();
     await setOffline(true);
     const offline = getService(OfflinePlugin);
-    await offline.scheduleORMDurably("res.partner", "web_save", [[], { name: "Queued" }], {});
-    const [create] = await offline._queue.list();
-    patchWithCleanup(IDBObjectStore.prototype, {
-        delete(key) {
-            if (this.name === "entries" && key === create.key) {
-                throw new Error("Could not delete the queue row");
-            }
-            return super.delete(key);
-        },
-    });
-    await offline.discardPendingChange(create.key);
-    expect(offline.getQueueError()).toBeTruthy();
-    expect(await offline._queue.wasDraftDiscarded(create.key)).toBe(undefined);
-    expect((await offline._queue.get(create.key)).args).toEqual(create.args);
+    const db = new RealIndexedDB(`test-offline-discard-${crypto.randomUUID()}`, undefined, { durability: "strict" });
+    patchWithCleanup(offline._queue, { db });
+    try {
+        await offline.scheduleORMDurably("res.partner", "web_save", [[], { name: "Queued" }], {});
+        const [create] = await offline._queue.list();
+        patchWithCleanup(IDBObjectStore.prototype, {
+            delete(key) {
+                if (this.name === "entries" && key === create.key) {
+                    throw new Error("Could not delete the queue row");
+                }
+                return super.delete(key);
+            },
+        });
+        await offline.discardPendingChange(create.key);
+        expect(Boolean(offline.getQueueError())).toBe(true);
+        expect(await offline._queue.wasDraftDiscarded(create.key)).toBe(undefined);
+        expect((await offline._queue.get(create.key)).args).toEqual(create.args);
+    } finally {
+        await db.deleteDatabase();
+    }
 });
 
 test("discarding an expired receipt recovery does not mark its original create unsent", async () => {
