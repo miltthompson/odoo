@@ -179,6 +179,45 @@ test("a draft discarded by another tab is recreated with its selected tags", asy
     expect(entries[0].args).toEqual([[], { name: "Recreated draft", tag_ids: [[6, false, [6]]] }]);
 });
 
+test("an online replacement for a discarded draft keeps its selected tags", async () => {
+    class Tag extends models.Model {
+        _records = [{ id: 6, display_name: "Priority" }];
+    }
+    class Lead extends models.Model {
+        name = fields.Char();
+        tag_ids = fields.Many2many({ relation: "tag", default: [6] });
+    }
+    defineModels([Lead, Tag]);
+    let record;
+    patchWithCleanup(Record.prototype, {
+        setup(config) {
+            super.setup(...arguments);
+            if (config.isRoot) {
+                record = this;
+            }
+        },
+    });
+    mockDate("2026-01-01T12:00:00");
+    onRpc("web_save", ({ args }) => { expect.step(args); });
+    onRpc("/web/offline/sync", () => expect.step("unexpected replay"));
+    await mountView({
+        type: "form", resModel: "lead",
+        arch: `<form><field name="name"/><field name="tag_ids" widget="many2many_tags"/></form>`,
+    });
+    const offline = getService(OfflinePlugin);
+    const changes = { name: "Old draft" };
+    const id = await offline.scheduleORMDurably("lead", "web_save", [[], changes], {}, { extras: { changes } });
+    await record.setOfflineChanges(id);
+    const [draft] = await offline._queue.list();
+    mockDate("2026-02-02T12:00:00");
+    await offline.discardPendingChange(draft.key);
+
+    await contains("[name='name'] input").edit("Replacement online");
+    await contains(".o_form_button_save").click();
+    expect.verifySteps([[[], { name: "Replacement online", tag_ids: [[6, false, [6]]] }]]);
+    expect(await offline._queue.list()).toEqual([]);
+});
+
 test("an offline save uses the create receipt persisted by another tab", async () => {
     class Lead extends models.Model {
         name = fields.Char();
@@ -613,6 +652,43 @@ test("reopening an edit queued with the server ID still keeps subsequent saves i
     const queued = await offline._queue.list();
     expect(queued.map(({ state }) => state)).toEqual(["needs_attention", "held_back", "held_back"]);
     expect(queued.at(-1).args).toEqual([[47], { name: "Latest edit" }]);
+    expect.verifySteps([]);
+});
+
+test("the form pager moves after saving behind a rejected edit", async () => {
+    class Lead extends models.Model {
+        name = fields.Char();
+        _records = [{ id: 47, name: "First" }, { id: 48, name: "Second" }];
+    }
+    defineModels([Lead]);
+    let record;
+    patchWithCleanup(Record.prototype, {
+        setup(config) {
+            super.setup(...arguments);
+            if (config.isRoot) {
+                record = this;
+            }
+        },
+    });
+    onRpc("web_save", () => expect.step("unexpected direct write"));
+    onRpc("/web/offline/sync", () => rejection(0, "odoo.exceptions.AccessError"));
+    await mountView({
+        type: "form", resModel: "lead", resId: 47, resIds: [47, 48],
+        arch: `<form><field name="name"/></form>`,
+    });
+    const offline = getService(OfflinePlugin);
+    const changes = { name: "Rejected edit" };
+    const edit = await offline.scheduleORMDurably("lead", "web_save", [[47], changes], {}, { extras: { changes } });
+    await offline.syncPendingChanges();
+    await record.setOfflineChanges(edit);
+    await contains("[name='name'] input").edit("Latest edit");
+    await contains(".o_pager_next").click();
+
+    expect(record.resId).toBe(48);
+    await offline.syncPendingChanges();
+    const queued = await offline._queue.list();
+    expect(queued.map(({ state }) => state)).toEqual(["needs_attention", "held_back"]);
+    expect(queued[1].args).toEqual([[47], { name: "Latest edit" }]);
     expect.verifySteps([]);
 });
 
