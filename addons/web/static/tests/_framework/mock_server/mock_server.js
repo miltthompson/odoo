@@ -559,6 +559,7 @@ export class MockServer {
             this.callKw,
             { final: true }
         );
+        this._onRoute(["/web/offline/sync"], this.syncOffline, { final: true });
         this._onRoute(["/web/dataset/resequence"], this.resequence);
         this._onRoute(["/web/image/<string:model>/<int:id>/<string:field>"], this.loadImage);
         this._onRoute(["/web/webclient/load_menus"], this.loadMenus);
@@ -1231,6 +1232,22 @@ export class MockServer {
             }
         }
         return null;
+    }
+
+    async syncOffline(request) {
+        const { params, ...envelope } = await request.json();
+        const { model, method, args, kwargs } = params;
+        // Mock the dispatch behind sync through the same dataset observers and ORM listeners.
+        // A test can still intercept /web/offline/sync directly to assert the wire protocol.
+        const path = `/web/dataset/call_kw/${encodeURIComponent(model)}/${encodeURIComponent(method)}`;
+        const response = await this._handleRequest(new URL(path, request.url), {
+            method: "POST",
+            headers: request.headers,
+            body: JSON.stringify({ ...envelope, params: { model, method, args, kwargs } }),
+        });
+        return response instanceof Response ? response : new Response(JSON.stringify(response), {
+            headers: { "Content-Type": "application/json" },
+        });
     }
 
     _getEditTranslationXML(res_id, values, languages, translateFn) {

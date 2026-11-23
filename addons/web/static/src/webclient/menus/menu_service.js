@@ -1,6 +1,9 @@
 import { computed, signal, t, usePlugin } from "@odoo/owl";
 import { DebugModePlugin } from "@web/core/debug_mode_plugin";
+import { Crypto } from "@web/core/crypto";
+import { offlineDatabaseName } from "@web/core/offline/offline_storage";
 import { registry } from "@web/core/registry";
+import { user } from "@web/core/user";
 import { IndexedDB } from "@web/core/utils/indexed_db";
 import { session } from "@web/session";
 
@@ -45,19 +48,37 @@ export const menuService = {
         });
         const menusData = signal(null, { type: t.record(t.string()) });
 
-        const menuDB = new IndexedDB("webclient_menu", session.registry_hash);
+        const owner = { db: session.db, uid: user.userId };
+        const crypto = window.isSecureContext && owner.db && owner.uid && session.browser_cache_secret &&
+            new Crypto(session.browser_cache_secret);
+        const menuDB = crypto && new IndexedDB(offlineDatabaseName("webclient_menu", owner), session.registry_hash);
+        let clearing = false;
+        async function storeMenus(menus) {
+            if (menuDB && !clearing) {
+                const data = await crypto.encrypt(menus);
+                if (!clearing) {
+                    await menuDB.write(table, key, data);
+                }
+            }
+        }
         const table = "menu";
         const debugMode = usePlugin(DebugModePlugin);
         const key = JSON.stringify({ debug: debugMode.isActive() });
         const loadMenusUrl = `/web/webclient/load_menus`;
 
-        const storedMenus = await menuDB.read(table, key);
+        let storedMenus;
+        if (menuDB) {
+            const stored = await menuDB.read(table, key);
+            if (stored) {
+                storedMenus = await crypto.decrypt(stored).catch(() => undefined);
+            }
+        }
         if (storedMenus) {
             fetchMenus().then((res) => {
                 if (res) {
                     const fetchedMenus = JSON.stringify(res);
                     if (fetchedMenus !== storedMenus) {
-                        menuDB.write(table, key, fetchedMenus);
+                        storeMenus(fetchedMenus);
                         menusData.set(res);
                         env.bus.trigger("MENUS:APP-CHANGED");
                     }
@@ -68,7 +89,7 @@ export const menuService = {
             const fetchedMenus = await fetchMenus();
             menusData.set(fetchedMenus);
             if (fetchedMenus) {
-                menuDB.write(table, key, JSON.stringify(fetchedMenus));
+                storeMenus(JSON.stringify(fetchedMenus));
             }
         }
 
@@ -77,6 +98,11 @@ export const menuService = {
             getApps: computed(() => getMenu("root").children.map(getMenu)),
             getCurrentApp: computed(() => currentAppId() && getMenu(currentAppId())),
             getMenu,
+            clearCache() {
+                clearing = true;
+                sessionStorage.removeItem("menu_id");
+                return menuDB?.invalidate();
+            },
             getMenuAsTree(menuID) {
                 const menu = getMenu(menuID);
                 if (!menu.childrenTree) {

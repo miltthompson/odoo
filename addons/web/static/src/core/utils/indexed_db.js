@@ -17,11 +17,14 @@ function formatStorageSize(size) {
 }
 
 export class IndexedDB {
-    constructor(name, version) {
+    constructor(name, version, { durability = "relaxed" } = {}) {
         this.name = name;
+        this.durability = durability;
         this._tables = new Set([VERSION_TABLE]);
         this.mutex = new Mutex();
-        this.mutex.exec(() => this._checkVersion(version));
+        if (version !== undefined) {
+            this.mutex.exec(() => this._checkVersion(version));
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -121,6 +124,31 @@ export class IndexedDB {
                 }
             })
         );
+    }
+
+    /** Put a value and delete a row in one transaction. */
+    async writeAndDelete(table, key, value, deleteTable, deleteKey) {
+        this._tables.add(table);
+        this._tables.add(deleteTable);
+        return this.mutex.exec(() => this._execute((db) => {
+            if (!db) {
+                return;
+            }
+            return new Promise((resolve, reject) => {
+                const transaction = db.transaction([table, deleteTable], "readwrite", { durability: this.durability });
+                transaction.oncomplete = resolve;
+                transaction.onerror = (event) => reject(event.target.error);
+                transaction.onabort = () => reject(transaction.error || new Error("IndexedDB transaction aborted"));
+                try {
+                    transaction.objectStore(table).put(value, key);
+                    transaction.objectStore(deleteTable).delete(deleteKey);
+                    transaction.commit();
+                } catch (error) {
+                    transaction.abort();
+                    reject(error);
+                }
+            });
+        }));
     }
 
     /**
@@ -235,7 +263,7 @@ export class IndexedDB {
                 if (newTables.size !== 0) {
                     db.close();
                     const version = db.version + 1;
-                    return this._execute(callback, version).then(resolve);
+                    return this._execute(callback, version).then(resolve, reject);
                 }
                 Promise.resolve(callback(db))
                     .then(resolve)
@@ -255,6 +283,10 @@ export class IndexedDB {
                     .finally(() => db.close());
             };
             request.onerror = (event) => {
+                if (this.durability === "strict") {
+                    reject(event.target.error);
+                    return;
+                }
                 console.error(`IndexedDB error: ${event.target.error?.message}`);
                 Promise.resolve(callback()).then(resolve);
             };
@@ -267,7 +299,7 @@ export class IndexedDB {
             // Relaxed durability improves the write performances
             // https://nolanlawson.com/2021/08/22/speeding-up-indexeddb-reads-and-writes/
             // https://developer.mozilla.org/en-US/docs/Web/API/IDBTransaction/durability
-            const transaction = db.transaction(table, "readwrite", { durability: "relaxed" });
+            const transaction = db.transaction(table, "readwrite", { durability: this.durability });
             const store = transaction.objectStore(table);
 
             for (const item of items) {

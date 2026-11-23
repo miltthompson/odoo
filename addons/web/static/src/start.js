@@ -6,6 +6,7 @@ import { session } from "@web/session";
 import { _t } from "./core/l10n/translation";
 import { rpc } from "./core/network/rpc";
 import { isRPCCacheDisabled, RPCCache } from "./core/network/rpc_cache";
+import { offlineDatabaseName } from "./core/offline/offline_storage";
 import { mountComponent } from "./env";
 
 // Chrome iOS wraps some text nodes (like measures, email...)
@@ -33,8 +34,9 @@ export async function startWebClient(Webclient) {
     };
     odoo.isReady = false;
 
-    if (window.isSecureContext && session.browser_cache_secret && !isRPCCacheDisabled()) {
-        rpc.setCache(new RPCCache("rpc", session.registry_hash, session.browser_cache_secret));
+    if (window.isSecureContext && user.userId && session.db && session.browser_cache_secret && !isRPCCacheDisabled()) {
+        const name = offlineDatabaseName("rpc", { db: session.db, uid: user.userId });
+        rpc.setCache(new RPCCache(name, session.registry_hash, session.browser_cache_secret, { hashKeys: true }));
     }
 
     await whenReady();

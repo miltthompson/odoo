@@ -2,6 +2,7 @@ import { IDBQuotaExceededError, IndexedDB } from "@web/core/utils/indexed_db";
 import { router } from "../browser/router";
 import { deepCopy } from "../utils/objects";
 import { Crypto, CRYPTO_ALGO } from "../crypto";
+import { offlineDigest } from "@web/core/offline/offline_storage";
 
 /**
  * The rpc cache can be turned off for the current browsing session by putting
@@ -81,11 +82,13 @@ class RamCache {
 }
 
 export class RPCCache {
-    constructor(name, version, secret) {
+    constructor(name, version, secret, { hashKeys = false } = {}) {
         this.crypto = new Crypto(secret);
+        this.hashKeys = hashKeys;
         this.indexedDB = new IndexedDB(name, version + CRYPTO_ALGO);
         this.ramCache = new RamCache();
         this.pendingRequests = {};
+        this.generation = 0;
         this.checkSize(); // we want to control the disk space used by Odoo
     }
 
@@ -138,10 +141,12 @@ export class RPCCache {
             const request = { callbacks: [callback], invalidated: false };
             this.pendingRequests[requestKey] = request;
             const now = Date.now();
+            const generation = this.generation;
 
             // execute the fallback and write the result in the caches
             const prom = new Promise((resolve, reject) => {
                 const fromCache = Promise.withResolvers();
+                const diskKey = type === "disk" && (this.hashKeys ? offlineDigest(key) : Promise.resolve(key));
                 let fromCacheValue;
                 const onFullfilled = (result) => {
                     resolve(result);
@@ -159,13 +164,16 @@ export class RPCCache {
                         expires: now + maxAge,
                     });
                     if (type === "disk") {
-                        this.crypto.encrypt(result).then((encryptedResult) => {
+                        Promise.all([diskKey, this.crypto.encrypt(result)]).then(([hashedKey, encryptedResult]) => {
+                            if (request.invalidated || generation !== this.generation) {
+                                return;
+                            }
                             const diskEntry = {
                                 data: encryptedResult,
                                 timestamp: now,
                                 expires: now + maxAge,
                             };
-                            this.indexedDB.write(table, key, diskEntry).catch((e) => {
+                            this.indexedDB.write(table, hashedKey, diskEntry).catch((e) => {
                                 if (e instanceof IDBQuotaExceededError) {
                                     this.indexedDB.deleteDatabase();
                                 } else {
@@ -204,8 +212,8 @@ export class RPCCache {
                         fromCache.resolve();
                     });
                 } else if (type === "disk" && !noCache) {
-                    this.indexedDB
-                        .read(table, key)
+                    diskKey
+                        .then((hashedKey) => this.indexedDB.read(table, hashedKey))
                         .then(async (result) => {
                             if (result) {
                                 if (result.expires < now) {
@@ -236,12 +244,14 @@ export class RPCCache {
     }
 
     invalidate(tables) {
-        this.indexedDB.invalidate(tables);
+        this.generation++;
+        const cleared = this.indexedDB.invalidate(tables);
         this.ramCache.invalidate(tables);
         // flag the pending requests as invalidated s.t. we don't write their results in caches
         for (const key in this.pendingRequests) {
             this.pendingRequests[key].invalidated = true;
         }
         this.pendingRequests = {};
+        return cleared;
     }
 }

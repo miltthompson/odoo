@@ -33,7 +33,9 @@ export function mockIndexedDBFactory(name, { fn }) {
                 }
                 this.name = name;
                 this.mutex = new Mutex();
-                this.mutex.exec(() => this._checkVersion(version));
+                if (version !== undefined) {
+                    this.mutex.exec(() => this._checkVersion(version));
+                }
             }
 
             get objectStoreNames() {
@@ -72,6 +74,14 @@ export function mockIndexedDBFactory(name, { fn }) {
                     for (const item of items) {
                         dbs[this.name][table][item.key] = item.value;
                     }
+                });
+            }
+
+            async writeAndDelete(table, key, value, deleteTable, deleteKey) {
+                return this.mutex.exec(() => {
+                    const db = dbs[this.name];
+                    (db[table] ||= {})[key] = value;
+                    delete db[deleteTable]?.[deleteKey];
                 });
             }
 

@@ -10,6 +10,9 @@ import { post } from "@web/core/network/http_service";
 import { redirect } from "@web/core/utils/urls";
 import { useService } from "@web/core/utils/hooks";
 import { ORM } from "@web/core/orm_plugin";
+import { ConfirmationDialog } from "@web/core/confirmation_dialog/confirmation_dialog";
+import { OfflinePlugin } from "@web/core/offline/offline_plugin";
+import { rpc } from "@web/core/network/rpc";
 
 function supportItem() {
     const url = session.support_url;
@@ -112,18 +115,36 @@ function installPWAItem() {
 
 function logOutItem() {
     const pwa = useService("pwa");
+    const menu = useService("menu");
+    const dialog = useService("dialog");
+    const offline = usePlugin(OfflinePlugin);
     let route = "/web/session/logout";
     if (pwa.isScopedApp) {
         route += `?redirect=${encodeURIComponent(pwa.startUrl)}`;
+    }
+    async function logOut() {
+        const url = await post(route, { csrf_token: odoo.csrf_token }, "url");
+        browser.navigator.serviceWorker?.controller?.postMessage("user_logout");
+        await Promise.allSettled([offline.clearReadStores(), rpc.clearCache(), menu.clearCache()]);
+        redirect(url);
     }
     return {
         type: "item",
         id: "logout",
         description: _t("Log out"),
         callback: async () => {
-            browser.navigator.serviceWorker?.controller?.postMessage("user_logout");
-            const url = await post(route, { csrf_token: odoo.csrf_token }, "url");
-            redirect(url);
+            await offline.getQueueReady();
+            if (offline.hasScheduledCalls) {
+                dialog.add(ConfirmationDialog, {
+                    title: _t("Log out"),
+                    body: _t("Your pending changes will stay on this device and can be sent the next time you log in here."),
+                    confirmLabel: _t("Log out"),
+                    confirm: logOut,
+                    cancel: () => {},
+                });
+            } else {
+                await logOut();
+            }
         },
         sequence: 70,
     };

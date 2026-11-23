@@ -2,6 +2,7 @@ import { markRaw, markup, toRaw } from "@odoo/owl";
 import { serializeDate, serializeDateTime } from "@web/core/l10n/dates";
 import { _t } from "@web/core/l10n/translation";
 import { ConnectionLostError, RPCError } from "@web/core/network/rpc";
+import { x2ManyCommands } from "@web/core/orm_plugin";
 import { evaluateBooleanExpr } from "@web/core/py_js/py";
 import { pick } from "@web/core/utils/objects";
 import { DataPoint } from "./datapoint";
@@ -158,6 +159,10 @@ export class Record extends DataPoint {
         return !this.resId;
     }
 
+    get hasOfflineDraft() {
+        return Boolean(this._offlineDraft || (this.isNew && this._offlineId));
+    }
+
     get isValid() {
         return !this._invalidFields.size;
     }
@@ -198,7 +203,7 @@ export class Record extends DataPoint {
                 });
             } catch (e) {
                 if (e instanceof ConnectionLostError) {
-                    return this.model.offlinePlugin.scheduleORM(
+                    return this.model.offlinePlugin.scheduleORMDurably(
                         this.resModel,
                         "web_unlink",
                         [[this.resId]],
@@ -390,13 +395,25 @@ export class Record extends DataPoint {
                     s.value.args[0]?.[0] === this.resId
             );
         }
-        if (scheduledORM) {
+        if (scheduledORM && !scheduledORM.value.manualRecovery) {
             this._offlineId = scheduledORM.key;
+            if (this.isNew) {
+                this._trackOfflineDraft(this._offlineId);
+            } else if (scheduledORM.value.method === "web_save" &&
+                scheduledORM.value.model === this.resModel &&
+                (scheduledORM.value.resolvedResId ?? scheduledORM.value.args[0]?.[0]) === this.resId) {
+                // Edits using the server ID still need to wait behind older queued changes.
+                this._queuedDraftResId = this.resId;
+            }
             this._offlineChanges = markRaw(
                 this._parseOfflineValues(scheduledORM.value.extras.changes)
             );
             this._offlineTimeStamp = scheduledORM.value.extras.timeStamp;
-            return this.update(this._offlineChanges);
+            return this.model.mutex.exec(async () => {
+                await this._update(this._offlineChanges);
+                // Reopening a queued change loads saved data; it is not another edit.
+                this._commitSave();
+            });
         }
     }
 
@@ -426,6 +443,12 @@ export class Record extends DataPoint {
         const undoChanges = () => {
             for (const fieldName of invalidFields) {
                 this.setInvalidField(fieldName);
+            }
+            // An edit can add a field that wasn't loaded by the view.
+            for (const fieldName of Object.keys(this.data)) {
+                if (!Object.hasOwn(initialData, fieldName)) {
+                    delete this.data[fieldName];
+                }
             }
             Object.assign(this.data, initialData);
             this._changes = markRaw(initialChanges);
@@ -818,6 +841,10 @@ export class Record extends DataPoint {
                     result[fieldName] = value;
                     break;
                 }
+                case "one2many": {
+                    result[fieldName] = changes ? value._getCommands() : [];
+                    break;
+                }
                 default:
                     result[fieldName] = this._formatServerValue(field.type, value);
             }
@@ -829,8 +856,8 @@ export class Record extends DataPoint {
      * @param {RecordType<string, unknown>} [changes]
      * @param {FieldSpecifications} [params]
      */
-    _getChanges(changes = this._changes, { withReadonly } = {}) {
-        if (!this.resId) {
+    _getChanges(changes = this._changes, { withReadonly, isNew = this.isNew } = {}) {
+        if (isNew) {
             // Apply the initial changes when the record is new
             changes = { ...this._values, ...changes };
         }
@@ -854,7 +881,7 @@ export class Record extends DataPoint {
             }
             if (field.type === "one2many" || field.type === "many2many") {
                 const commands = value._getCommands({ withReadonly });
-                if (!this.isNew && !commands.length && !withReadonly) {
+                if (!isNew && !commands.length && !withReadonly) {
                     continue;
                 }
                 result[fieldName] = commands;
@@ -1216,9 +1243,48 @@ export class Record extends DataPoint {
         this._activeFieldsToRestore = undefined;
     }
 
+    _trackOfflineDraft(legacyKey) {
+        const create = this.model.offlinePlugin.getPendingDraftCreate(this.resModel, legacyKey);
+        if (create && !create.manualRecovery) {
+            this._offlineDraft = create;
+        }
+    }
+
+    _adoptSyncedDraft(resId) {
+        const resIds = [...new Set([...this.resIds, resId])];
+        this.model._updateConfig(this.config, { resId, resIds }, { reload: false });
+    }
+
     async _save({ reload = true, onError, nextId } = {}) {
         if (this.model._closeUrgentSaveNotification) {
             this.model._closeUrgentSaveNotification();
+        }
+        const offline = this.model.offlinePlugin;
+        const urgent = this.model._urgentSave && this.model.useSendBeaconToSaveUrgently &&
+            !this.model.env.inDialog;
+        let pendingDraft = false;
+        let replayedDraft = false;
+        let recoveringDraft = false;
+        if (this.hasOfflineDraft || this._queuedDraftResId) {
+            if (urgent) {
+                // A beacon can't safely wait for the queue or preserve its ordering.
+                pendingDraft = true;
+            } else if (this._offlineDraft || this._queuedDraftResId) {
+                const draft = this._offlineDraft || { resId: this._queuedDraftResId };
+                const state = await offline.getDraftSaveState(this.resModel, draft);
+                if (!state) {
+                    return false;
+                }
+                if (state.resId && !this.resId) {
+                    this._adoptSyncedDraft(state.resId);
+                }
+                recoveringDraft = state.recover && !this.resId;
+                pendingDraft = state.pending || recoveringDraft;
+                replayedDraft = Boolean(this._offlineDraft && this.resId);
+                if (!pendingDraft) {
+                    this._queuedDraftResId = undefined;
+                }
+            }
         }
         const creation = !this.resId;
         if (nextId) {
@@ -1239,7 +1305,8 @@ export class Record extends DataPoint {
         }
         const changes = this._getChanges();
         delete changes.id; // id never changes, and should not be written
-        if (!creation && !Object.keys(changes).length) {
+        const recoveryReason = this._getDraftRecoveryReason(changes);
+        if ((!creation || this._offlineId) && !Object.keys(changes).length) {
             if (nextId) {
                 return this.model.load({ resId: nextId });
             }
@@ -1249,14 +1316,9 @@ export class Record extends DataPoint {
             this.dirty = false;
             return true;
         }
-        if (
-            this.model._urgentSave &&
-            this.model.useSendBeaconToSaveUrgently &&
-            !this.model.env.inDialog
-        ) {
-            // We are trying to sa ve urgently because the user is closing the page when offline.
-            // Unfortunately, we can't save on IndexedDB before unload.
-            if (this.model.offlinePlugin.isOffline()) {
+        if (urgent) {
+            // There is not enough time to persist queued changes during page unload.
+            if (pendingDraft || offline.isOffline()) {
                 this.model._closeUrgentSaveNotification = this.model.notification.add(
                     _t(
                         `Heads up! Your recent changes cannot be saved automatically while you are offline. Please click the %(uploadIcon)s button now to ensure your work is saved before you exit this tab.`,
@@ -1300,6 +1362,21 @@ export class Record extends DataPoint {
         if (canProceed === false) {
             return false;
         }
+        if (pendingDraft || recoveryReason) {
+            const saved = await this._offlineSave(recoveryReason);
+            if (saved && recoveringDraft && !offline.isOffline()) {
+                await offline.syncPendingChanges();
+                const state = await offline.getDraftSaveState(this.resModel, this._offlineDraft);
+                if (state?.resId) {
+                    this._adoptSyncedDraft(state.resId);
+                }
+            } else if (saved && pendingDraft) {
+                offline.syncPendingChanges();
+            }
+            return saved;
+        }
+        // Reload a replayed draft to replace browser-only line IDs with their server IDs.
+        reload ||= replayedDraft;
         // keep x2many orderBy if we stay on the same record
         const orderBys = {};
         if (!nextId) {
@@ -1366,10 +1443,29 @@ export class Record extends DataPoint {
                 this.model.hooks.onWillLoadRoot(this.config);
             }
             this._setData(records[0], { orderBys });
+            if (replayedDraft) {
+                this._offlineDraft = undefined;
+            }
         } else {
             this._commitSave(records);
         }
         return true;
+    }
+
+    _getDraftRecoveryReason(changes) {
+        if (!this.hasOfflineDraft) {
+            return;
+        }
+        if (!this._offlineDraft && this.isNew) {
+            return _t("The original draft could not be found. Check whether the record was sent before recreating it.");
+        }
+        if (Object.entries(changes).some(([name, commands]) =>
+            this.fields[name]?.type === "one2many" && commands.length
+        )) {
+            return _t("Reopen %(record)s after it has been sent to reapply this line change.", {
+                record: getOfflineDisplayName(this) || _t("this record"),
+            });
+        }
     }
 
     _commitSave(records) {
@@ -1388,33 +1484,70 @@ export class Record extends DataPoint {
         this.dirty = false;
     }
 
-    _offlineSave() {
-        this._offlineChanges = markRaw({ ...(this._offlineChanges || {}), ...this._changes });
-        const offlineChanges = this._getChanges(this._offlineChanges);
-        delete offlineChanges.id; // id never changes, and should not be written
-
-        this._offlineTimeStamp = this._offlineTimeStamp || Date.now();
-        this._offlineId = this.model.offlinePlugin.scheduleORM(
-            this.resModel,
-            "web_save",
-            [this.resId ? [this.resId] : [], offlineChanges],
-            { context: this.context, specification: {} }, //Here for the kwargs we don't need the specification or the next_id
-            {
-                id: this._offlineId,
-                extras: {
-                    ...getScheduleORMExtras(this.model, [this]),
-                    changes: this._formatOfflineValues(this._offlineChanges),
-                    originalValues: this._formatOfflineValues(
-                        pick(this._values, ...Object.keys(this._offlineChanges)),
-                        { changes: false }
-                    ),
-                    timeStamp: this._offlineTimeStamp,
-                },
-            }
-        );
-
-        this._commitSave();
+    async _offlineSave(recoveryReason) {
+        const { call, onSaved } = this._prepareOfflineSave(recoveryReason);
+        const keys = await this.model.offlinePlugin.scheduleORMBatch([call]);
+        if (!keys) {
+            return false;
+        }
+        onSaved(keys[0]);
         return true;
+    }
+
+    _prepareOfflineSave(recoveryReason) {
+        const offlineChanges = markRaw({ ...(this._offlineChanges || {}), ...this._changes });
+        const editingDraft = this.isNew && this._offlineId;
+        const changes = this._getChanges(this._changes, { isNew: this.isNew && !editingDraft });
+        let createArgs;
+        if (editingDraft) {
+            const values = this._getChanges();
+            const { CREATE, UPDATE, DELETE, set } = x2ManyCommands;
+            for (const [fieldName, commands] of Object.entries(values)) {
+                if (this.fields[fieldName].type === "many2many") {
+                    // Committing a draft clears its commands, but not its selected tags.
+                    values[fieldName] = [
+                        set(this.data[fieldName].currentIds.filter((id) => typeof id === "number")),
+                        ...commands.filter(([op]) => op === CREATE || op === UPDATE || op === DELETE),
+                    ];
+                }
+            }
+            createArgs = [[], values];
+        }
+        const timeStamp = this._offlineTimeStamp || Date.now();
+        return {
+            call: {
+                model: this.resModel,
+                method: "web_save",
+                args: [this.resId ? [this.resId] : [], changes],
+                kwargs: { context: this.context, specification: {} },
+                options: {
+                    id: this._offlineId,
+                    draftCreate: this._offlineDraft,
+                    manualRecovery: recoveryReason || this._getDraftRecoveryReason(changes),
+                    // The queue checks for the original create under its lock. If it was
+                    // discarded, a new create must carry all values, not just this edit.
+                    createArgs,
+                    extras: {
+                        ...getScheduleORMExtras(this.model, [this]),
+                        changes: this._formatOfflineValues(offlineChanges),
+                        originalValues: this._formatOfflineValues(
+                            pick(this._values, ...Object.keys(offlineChanges)),
+                            { changes: false }
+                        ),
+                        timeStamp,
+                    },
+                },
+            },
+            onSaved: (id) => {
+                this._offlineId = id;
+                if (this.isNew) {
+                    this._trackOfflineDraft(id);
+                }
+                this._offlineTimeStamp = timeStamp;
+                this._offlineChanges = offlineChanges;
+                this._commitSave();
+            },
+        };
     }
     /**
      * For owl reactivity, it's better to only update the keys inside the evalContext
@@ -1484,7 +1617,7 @@ export class Record extends DataPoint {
             });
         } catch (e) {
             if (e instanceof ConnectionLostError) {
-                return this.model.offlinePlugin.scheduleORM(
+                return this.model.offlinePlugin.scheduleORMDurably(
                     this.resModel,
                     method,
                     [[this.resId]],

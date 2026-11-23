@@ -285,7 +285,7 @@ export class DynamicList extends DataPoint {
             });
         } catch (e) {
             if (e instanceof ConnectionLostError) {
-                this.model.offlinePlugin.scheduleORM(
+                const key = await this.model.offlinePlugin.scheduleORMDurably(
                     this.resModel,
                     "web_unlink",
                     [resIds],
@@ -294,6 +294,9 @@ export class DynamicList extends DataPoint {
                         extras: getScheduleORMExtras(this.model, records),
                     }
                 );
+                if (key === false) {
+                    return false;
+                }
                 this._unselectAll();
                 return true;
             }
@@ -492,9 +495,15 @@ export class DynamicList extends DataPoint {
                 : await this.model.orm.webSaveMulti(this.resModel, resIds, valsList, kwargs);
         } catch (e) {
             if (e instanceof ConnectionLostError) {
-                // keep the changes and replay them when the connection is back
-                records.forEach((record) => record._offlineSave());
-                return true;
+                let saved = false;
+                try {
+                    saved = await this._saveRecordsOffline(records);
+                    return saved;
+                } finally {
+                    if (!saved) {
+                        undoFns.forEach((undo) => undo());
+                    }
+                }
             }
             undoFns.forEach((undo) => undo());
             throw e;
@@ -508,6 +517,16 @@ export class DynamicList extends DataPoint {
             record._setData(valuesById[record.resId]);
         }
         this.model.hooks.onSavedMulti(records);
+        return true;
+    }
+
+    async _saveRecordsOffline(records) {
+        const saves = records.map((record) => record._prepareOfflineSave());
+        const keys = await this.model.offlinePlugin.scheduleORMBatch(saves.map(({ call }) => call));
+        if (!keys) {
+            return false;
+        }
+        saves.forEach(({ onSaved }, index) => onSaved(keys[index]));
         return true;
     }
 
@@ -555,7 +574,7 @@ export class DynamicList extends DataPoint {
         } catch (e) {
             if (e instanceof ConnectionLostError) {
                 const records = this.records.filter((r) => resIds.includes(r.resId));
-                this.model.offlinePlugin.scheduleORM(
+                const key = await this.model.offlinePlugin.scheduleORMDurably(
                     this.resModel,
                     method,
                     [resIds],
@@ -564,6 +583,9 @@ export class DynamicList extends DataPoint {
                         extras: getScheduleORMExtras(this.model, records),
                     }
                 );
+                if (key === false) {
+                    return false;
+                }
                 this._unselectAll();
                 return true;
             }

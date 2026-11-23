@@ -24,6 +24,7 @@
             </button>
             <t t-set-slot="content">
                 <div class="o_offline_systray_content px-2">
+                    <p t-if="this.offlinePlugin.getQueueError()" role="alert" class="text-danger" t-out="this.offlinePlugin.getQueueError()"/>
                     <t t-foreach="this.groupEntries()" t-as="entry" t-key="entry[0]">
                         <div class="o_horizontal_separator text-uppercase fw-bolder small mb-1">
                             <span t-out="entry[0]"/>
@@ -52,7 +53,8 @@
                                         <t class="o_tag_badge_text o_badge_text" t-out="element.status.label"/>
                                     </span>
                                 </div>
-                                <div>
+                                <button t-if="element.retryKey" class="btn btn-link p-0 ms-1" data-available-offline="" t-on-click.stop="() => this.offlinePlugin.retryPendingChange(element.retryKey)">Retry</button>
+                                <div t-if="element.discardable">
                                     <button
                                         class="oi oi-filled btn btn-link text-danger py-0" data-icon="delete"
                                         title="Discard offline changes"
