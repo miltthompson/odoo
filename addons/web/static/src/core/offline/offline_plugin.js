@@ -349,7 +349,7 @@ export class OfflinePlugin extends Plugin {
                     recoveries.set(original.key, {
                         ...original, seq: null, state: "waiting", error: null,
                         // A stale form can still have the original never-sent snapshot.
-                        draftSent: true, draftRejected: false,
+                        draftSent: true, draftRejected: false, draftRollbackConfirmed: undefined,
                     });
                 }
                 const target = await this._resolveQueueTarget(call.options?.target);
@@ -411,7 +411,7 @@ export class OfflinePlugin extends Plugin {
 
     removeScheduledORM(legacyKey) {
         const entry = this.getPendingEntry(legacyKey);
-        if (entry) {
+        if (entry && this.canDiscardPendingChange(entry)) {
             delete this._ormToSync()[legacyKey];
             return this.discardPendingChange(entry.key);
         }
@@ -479,17 +479,30 @@ export class OfflinePlugin extends Plugin {
             if (!entry && unwritten) {
                 this._replaceEntry(await this._queue.add(unwritten));
             } else if (entry?.state === "needs_attention" && !entry.manualRecovery) {
-                await this._storeState(entry, "waiting");
+                const patch = this.canDiscardPendingChange(entry) ? undefined : { draftRollbackConfirmed: false };
+                await this._storeState(entry, "waiting", null, patch);
             }
         });
         return this._syncORM();
     }
 
+    canDiscardPendingChange(entry) {
+        if (entry.state === "sending") {
+            return false;
+        }
+        if (entry.method === "web_save" && !entry.args[0]?.length && entry.draftSent !== false &&
+            (entry.state === "needs_attention" || entry.draftRollbackConfirmed === false || entry.draftRejected)) {
+            // Legacy draftRejected flags were inferred from the exception type, not a rollback.
+            return entry.draftRollbackConfirmed === true;
+        }
+        return true;
+    }
+
     async discardPendingChange(key) {
         await this._enqueueWrite(async () => {
             const entry = await this._queue.get(key);
-            if (entry?.state !== "sending") {
-                await this._queue.remove(key, { discardedDraft: entry?.draftSent === false || entry?.draftRejected });
+            if (!entry || this.canDiscardPendingChange(entry)) {
+                await this._queue.remove(key, { discardedDraft: entry?.draftSent === false || entry?.draftRollbackConfirmed === true });
                 this._removeEntry(key);
             }
         });
@@ -785,10 +798,13 @@ export class OfflinePlugin extends Plugin {
 
     async _storeState(entry, state, error = null, patch) {
         const updated = { ...entry, state, error, ...patch };
-        if (state === "sending" && (entry.draftSent === false || entry.draftRejected)) {
-            // A lost response can mean the server applied this create. Keep its key recoverable.
+        if (state === "sending" && (entry.draftSent === false || entry.draftRollbackConfirmed === true)) {
+            // A lost response can mean the server applied this create. Prior confirmation
+            // no longer applies once we send it again.
             updated.draftSent = true;
-            delete updated.draftRejected;
+            if (entry.draftRollbackConfirmed === true) {
+                updated.draftRollbackConfirmed = false;
+            }
         }
         await this._queue.write(updated);
         this._replaceEntry(updated);
@@ -803,7 +819,10 @@ export class OfflinePlugin extends Plugin {
                 return _t("You no longer have access to this record.");
             case "odoo.exceptions.ValidationError":
             case "odoo.exceptions.UserError":
-                return _t("Not applied: %s", error.data.message);
+            case "odoo.exceptions.RedirectWarning":
+                return error.data.offline_replay_rolled_back === true
+                    ? _t("Not applied: %s", error.data.message)
+                    : error.data.message;
             default:
                 return _t("Something went wrong on the server. Try again later.");
         }
@@ -878,15 +897,12 @@ export class OfflinePlugin extends Plugin {
                             break;
                         }
                         blockers.push(entry);
-                        // These server errors roll back the draft and its receipt. Transport
-                        // and other uncertain failures must keep using the original key.
-                        const draftRejected = method === "web_save" && !args[0]?.length &&
-                            error instanceof RPCError && [
-                                "odoo.exceptions.MissingError", "odoo.exceptions.AccessError",
-                                "odoo.exceptions.ValidationError", "odoo.exceptions.UserError",
-                            ].includes(error.exceptionName);
-                        await this._queue.lock(() => this._storeState(entry, "needs_attention",
-                            this._reason(error), draftRejected ? { draftRejected } : undefined));
+                        // The same exception can be raised before or after commit. Only
+                        // explicit confirmation from this replay makes a failed create discardable.
+                        const patch = method === "web_save" && !args[0]?.length ? {
+                            draftRollbackConfirmed: error instanceof RPCError && error.data?.offline_replay_rolled_back === true,
+                        } : undefined;
+                        await this._queue.lock(() => this._storeState(entry, "needs_attention", this._reason(error), patch));
                         continue;
                     }
                     await this._queue.lock(async () => {

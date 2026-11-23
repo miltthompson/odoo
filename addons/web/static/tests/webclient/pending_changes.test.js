@@ -73,6 +73,27 @@ test("a rejected change shows its reason and can be retried", async () => {
     expect(liveRegion).toHaveText("All changes sent");
 });
 
+test("Needs attention only offers Discard on drafts with confirmed rollback", async () => {
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        return new Response(JSON.stringify({ error: { code: 0, data: {
+            name: "odoo.exceptions.RedirectWarning",
+            message: "Review draft",
+            ...(params.args[1].name === "Confirmed draft" && { offline_replay_rolled_back: true }),
+        } } }));
+    });
+    await mountWithCleanup(WebClient);
+    const offline = getService(OfflinePlugin);
+    for (const name of ["Confirmed draft", "Unconfirmed draft"]) {
+        await offline.scheduleORMDurably("res.partner", "web_save", [[], { name }], {}, { label: name });
+    }
+    await offline.syncPendingChanges();
+    await contains(".o_offline_systray").click();
+    expect(".o_offline_pending_item:contains(Confirmed draft) button[aria-label='Discard offline changes']").toHaveCount(1);
+    expect(".o_offline_pending_item:contains(Unconfirmed draft) button[aria-label='Discard offline changes']").toHaveCount(0);
+    expect(".o_offline_pending_item:contains(Unconfirmed draft) button:contains(Retry)").toHaveCount(1);
+});
+
 test("a manual recovery opens the server record without applying the queued line edit", async () => {
     class PendingContact extends models.Model {
         _name = "pending.contact";

@@ -6,7 +6,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from odoo import SUPERUSER_ID, api, fields
-from odoo.exceptions import AccessError
+from odoo.exceptions import AccessError, RedirectWarning, ValidationError
 from odoo.http.retrying import retrying
 from odoo.modules.registry import Registry
 from odoo.service.model import call_kw
@@ -133,6 +133,45 @@ class TestOfflineSync(HttpCase):
         self.assertFalse(self.env['res.partner'].search([('name', '=', 'Must roll back')]))
         self.assertFalse(self.env['web.offline.operation'].search([('key', '=', key)]))
         self.assertTrue(self._send(key, steps=steps[:1])['result'])
+
+    @mute_logger('odoo.http')
+    def test_replay_error_confirms_rollback_after_partial_create(self):
+        self.authenticate(self.alice.login, self.alice.login)
+        for exception in (ValidationError('Invalid draft'), RedirectWarning('Review draft', 1, 'Open')):
+            with self.subTest(exception=type(exception).__name__):
+                key = str(uuid4())
+
+                def dispatch(model, method, args, kwargs):
+                    call_kw(model, method, args, kwargs)
+                    raise exception
+
+                with patch('odoo.addons.web.models.web_offline_operation.call_kw', side_effect=dispatch):
+                    error = self._sync(key, 'web_save', [[], {'name': key}, {}])['error']['data']
+                self.assertEqual(error['name'], f'odoo.exceptions.{type(exception).__name__}')
+                self.assertIs(error['offline_replay_rolled_back'], True)
+                self.assertFalse(self.env['res.partner'].search([('name', '=', key)]))
+                self.assertFalse(self.env['web.offline.operation'].search([('key', '=', key)]))
+
+    @mute_logger('odoo.http')
+    def test_postcommit_error_does_not_confirm_rollback(self):
+        self.authenticate(self.alice.login, self.alice.login)
+        key = str(uuid4())
+        args = [[], {'name': key}, {}]
+
+        def fail_after_commit():
+            raise ValidationError('A post-commit callback failed')
+
+        def dispatch(model, method, args, kwargs):
+            result = call_kw(model, method, args, kwargs)
+            model.env.cr.postcommit.add(fail_after_commit)
+            return result
+
+        with patch('odoo.addons.web.models.web_offline_operation.call_kw', side_effect=dispatch):
+            error = self._sync(key, 'web_save', args)['error']['data']
+        self.assertEqual(error['name'], 'odoo.exceptions.ValidationError')
+        self.assertNotIn('offline_replay_rolled_back', error)
+        [receipt] = self._sync(key, 'web_save', args)['result']
+        self.assertEqual(self.env['res.partner'].search([('name', '=', key)]).ids, [receipt['id']])
 
     @mute_logger('odoo.http')
     def test_replay_rejects_transaction_control_and_can_be_retried(self):
