@@ -6,7 +6,8 @@ export function getOfflineOverlay(entries, model, context) {
     const changes = new Map();
     const companies = JSON.stringify(context.allowed_company_ids);
     for (const entry of entries) {
-        if (entry.target.model !== model || JSON.stringify(entry.kwargs?.context?.allowed_company_ids) !== companies) {
+        if (entry.manualRecovery || entry.target.model !== model ||
+            JSON.stringify(entry.kwargs?.context?.allowed_company_ids) !== companies) {
             continue;
         }
         const values = entry.extras?.overlayValues;

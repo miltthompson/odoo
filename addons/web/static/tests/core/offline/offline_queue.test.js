@@ -260,7 +260,7 @@ test("a normal save waits for pending draft replay, then writes to the server re
     expect(await offline._queue.list()).toEqual([]);
 });
 
-test("an expired draft receipt cannot turn a normal save into a new create", async () => {
+test("an expired draft receipt resends the original create and uses the acknowledged ID", async () => {
     class Lead extends models.Model {
         name = fields.Char();
     }
@@ -273,8 +273,20 @@ test("an expired draft receipt cannot turn a normal save into a new create", asy
         },
     });
     const writes = [];
+    const sent = [];
+    const applied = new Map();
     onRpc("web_save", ({ args }) => { writes.push(args); });
-    onRpc("/web/offline/sync", () => [{ id: 47 }]);
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        sent.push(params);
+        if (applied.has(params.key)) {
+            return { already_applied: true, created_ids: [applied.get(params.key)] };
+        }
+        if (!params.args[0].length) {
+            applied.set(params.key, 47);
+        }
+        return [{ id: 47 }];
+    });
     mockDate("2026-01-01T12:00:00");
     await mountView({ type: "form", resModel: "lead", arch: '<form><field name="name"/></form>' });
     const offline = getService(OfflinePlugin);
@@ -286,15 +298,47 @@ test("an expired draft receipt cannot turn a normal save into a new create", asy
     expect(await offline._queue.resolveRecord("lead", create.key)).toEqual({ id: 47, key: create.key });
 
     mockDate("2026-02-02T12:00:00");
-    await contains(".o_field_widget[name='name'] input").edit("Still unsaved");
+    expect(await offline._queue.resolveRecord("lead", create.key)).toBe(undefined);
+    await contains(".o_field_widget[name='name'] input").edit("After expiry");
     await contains(".o_form_button_save").click();
     expect(writes).toEqual([]);
+    expect(sent).toHaveLength(3);
+    expect(sent[1]).toEqual(sent[0]);
+    expect(sent[2].key).not.toBe(create.key);
+    expect(sent[2].args).toEqual([[`offline:${create.key}`], { name: "After expiry" }]);
+    expect(applied.size).toBe(1);
+    expect(record.resId).toBe(47);
     expect(await offline._queue.list()).toEqual([]);
-    expect(".o_notification").toHaveText(/sync status can no longer be verified/);
-    expect(".o_form_button_save").toBeVisible();
 });
 
-test("saving a replayed draft does not send an update to a browser-only line ID", async () => {
+test("a draft whose original key is lost is kept for manual recovery", async () => {
+    class Lead extends models.Model {
+        name = fields.Char();
+    }
+    defineModels([Lead]);
+    let record;
+    patchWithCleanup(Record.prototype, {
+        setup() {
+            super.setup(...arguments);
+            record = this;
+        },
+    });
+    onRpc("web_save", () => expect.step("unexpected create"));
+    onRpc("/web/offline/sync", () => expect.step("unexpected replay"));
+    await mountView({ type: "form", resModel: "lead", arch: '<form><field name="name"/></form>' });
+    const offline = getService(OfflinePlugin);
+    record._offlineId = "old-form-key";
+    await contains(".o_field_widget[name='name'] input").edit("Keep these values");
+    await contains(".o_form_button_save").click();
+    await offline.syncPendingChanges();
+    const [entry] = await offline._queue.list();
+    expect(entry.state).toBe("needs_attention");
+    expect(entry.error).toMatch(/original draft could not be found/i);
+    expect(entry.args[1]).toEqual({ name: "Keep these values" });
+    expect.verifySteps([]);
+});
+
+test("offline draft lines are read-only and an unmapped edit is saved for manual reapplication", async () => {
     class Draft extends models.Model {
         name = fields.Char();
         line_ids = fields.One2many({ relation: "line", relation_field: "draft_id" });
@@ -314,8 +358,12 @@ test("saving a replayed draft does not send an update to a browser-only line ID"
         },
     });
     const writes = [];
+    const replayed = [];
     onRpc("web_save", ({ args }) => { writes.push(args); });
-    onRpc("/web/offline/sync", () => [{ id: 47 }]);
+    onRpc("/web/offline/sync", async (request) => {
+        replayed.push((await request.json()).params);
+        return [{ id: 47 }];
+    });
     await mountView({
         type: "form", resModel: "draft",
         arch: `<form><field name="name"/><field name="line_ids">
@@ -325,18 +373,26 @@ test("saving a replayed draft does not send an update to a browser-only line ID"
     const offline = getService(OfflinePlugin);
     const changes = { name: "Draft", line_ids: [[0, 0, { name: "First line" }]] };
     const id = await offline.scheduleORMDurably("draft", "web_save", [[], changes], {}, { extras: { changes } });
+    expect(".o_field_x2many_list_row_add button").toBeVisible();
     await record.setOfflineChanges(id);
+    await animationFrame();
+    expect(".o_field_x2many_list_row_add button").toHaveCount(0);
     await offline._syncORM();
     expect(await offline._queue.list()).toEqual([]);
 
     const [line] = record.data.line_ids.records;
     await line.update({ name: "Edited line" });
-    expect(await record.save()).toBe(false);
+    expect(await record.save()).toBe(true);
+    const [pending] = await offline._queue.list();
+    expect(pending.state).toBe("needs_attention");
+    expect(pending.error).toMatch(/Reopen .* after it has been sent to reapply this line change/);
+    expect(pending.args).toEqual([[47], { line_ids: [[1, line._virtualId, { name: "Edited line" }]] }]);
+    expect(record.dirty).toBe(false);
+    await offline.retryPendingChange(pending.key);
     expect(writes).toEqual([]);
+    expect(replayed).toHaveLength(1);
+    await offline.discardPendingChange(pending.key);
     expect(await offline._queue.list()).toEqual([]);
-    await animationFrame();
-    expect(".o_notification").toHaveText(/line changes cannot be matched/);
-    expect(".o_form_button_save").toBeVisible();
 });
 
 test("the legacy form entry for a rejected follow-up uses the replayed record ID", async () => {

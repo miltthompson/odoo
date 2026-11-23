@@ -1,4 +1,4 @@
-import { animationFrame, expect, test } from "@odoo/hoot";
+import { animationFrame, expect, mockDate, test } from "@odoo/hoot";
 import { mockSendBeacon } from "@odoo/hoot-mock";
 import {
     contains,
@@ -384,6 +384,38 @@ test("saving a dirty local form after its create replayed syncs the edit immedia
     await sync;
     expect.verifySteps([[[47], { name: "Later edit" }]]);
     expect(offline.getPendingEntries()).toEqual([]);
+});
+
+test("saving an open local record after its receipt expires reuses the original UUID", async () => {
+    mockDate("2026-01-01T12:00:00");
+    const model = await mountOverlayView("form", `<field name="name"/>`);
+    const offline = getService(OfflinePlugin);
+    const record = model.root;
+    record._applyChanges({ name: "Draft" });
+    expect(await record._offlineSave()).toBe(true);
+    const [create] = offline.getPendingEntries();
+    const localId = record.resId;
+    // Replay in another tab does not update the open form in this tab.
+    await offline._queue.lock(async () => {
+        await offline._queue.recordResolution(record.resModel, localId, create.key, 1);
+        await offline._queue.remove(create.key);
+    });
+    mockDate("2026-02-02T12:00:00");
+    expect(await offline.resolveOfflineRecord(record.resModel, localId)).toBe(undefined);
+    const sent = [];
+    onRpc("/web/offline/sync", async (request) => {
+        const { params } = await request.json();
+        sent.push(params);
+        return params.key === create.key ? { already_applied: true, created_ids: [1] } : [{ id: 1 }];
+    });
+    record._applyChanges({ name: "After expiry" });
+    expect(await record.save()).toBe(true);
+    expect(sent).toHaveLength(2);
+    expect(sent[0].key).toBe(create.key);
+    expect(sent[0].args).toEqual(create.args);
+    expect(sent[1].args).toEqual([[`offline:${create.key}`], { name: "After expiry" }]);
+    expect(record.resId).toBe(1);
+    expect(await offline._queue.list()).toEqual([]);
 });
 
 test("opening an unrelated save preserves cached one2many child data", async () => {

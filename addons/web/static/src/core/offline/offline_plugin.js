@@ -332,27 +332,30 @@ export class OfflinePlugin extends Plugin {
         let keys;
         await this._enqueueWrite(async () => {
             if (calls.some(({ method, args, options }) =>
-                method === "web_save" && !args[0]?.length && options?.id !== undefined
+                method === "web_save" && (options?.draftCreate || (!args[0]?.length && options?.id !== undefined))
             )) {
                 // Another tab may have discarded or synced the draft since our last read.
                 await this._refreshQueue();
             }
-            const entries = await Promise.all(calls.map(async (call) => {
-                const { draftKey, draftTimeStamp } = call.options || {};
-                const draft = draftKey && !call.args[0]?.length &&
-                    await this._getDraftSaveState(call.model, draftKey, draftTimeStamp);
-                if (draft?.unverified) {
-                    return false;
+            const recoveries = new Map();
+            const changes = await Promise.all(calls.map(async (call) => {
+                const original = call.options?.draftCreate;
+                const draft = original && (!call.args[0]?.length || call.args[0]?.[0] === offlineRecordRef(original.key)) &&
+                    await this._getDraftSaveState(call.model, original);
+                const recovery = draft?.recover;
+                if (recovery) {
+                    // Resend the original payload and UUID. The server keeps the receipt even
+                    // after the browser forgets it; the new edit is a separate dependent write.
+                    recoveries.set(original.key, { ...original, seq: null, state: "waiting", error: null });
                 }
                 const target = await this._resolveQueueTarget(call.options?.target);
                 return this._makeEntry({
                     ...call,
-                    options: { ...call.options, target, resolvedDraftId: draft?.resId },
+                    options: { ...call.options, target, recoveryCreate: recovery ? original : undefined,
+                        resolvedDraftId: draft?.resId },
                 });
             }));
-            if (entries.includes(false)) {
-                return;
-            }
+            const entries = [...recoveries.values(), ...changes];
             let saved;
             try {
                 if (entries.some((entry) => this._hasUnsavedDependency(entry))) {
@@ -373,7 +376,7 @@ export class OfflinePlugin extends Plugin {
                 const latest = this.getPendingEntry(entry.legacyKey);
                 this._ormToSync()[entry.legacyKey] = this._compatEntry(latest);
             }
-            keys = saved.map((entry) => entry.legacyKey);
+            keys = saved.slice(recoveries.size).map((entry) => entry.legacyKey);
         });
         return keys;
     }
@@ -425,8 +428,12 @@ export class OfflinePlugin extends Plugin {
 
     /** Reference an offline create in replay args/kwargs without passing a local ID to the ORM. */
     getRecordReference(model, id) {
-        const create = this._pending().find((entry) => entry.model === model && entry.createdId === id);
+        const create = this.getPendingLocalCreate(model, id);
         return create && { value: offlineRecordRef(create.key), key: create.key };
+    }
+
+    getPendingLocalCreate(model, id) {
+        return this._pending().find((entry) => entry.model === model && entry.createdId === id);
     }
 
     resolveOfflineRecord(model, id) {
@@ -467,7 +474,7 @@ export class OfflinePlugin extends Plugin {
             const unwritten = this._pending().find((item) => item.key === key && item.seq === null);
             if (!entry && unwritten) {
                 this._replaceEntry(await this._queue.add(unwritten));
-            } else if (entry?.state === "needs_attention") {
+            } else if (entry?.state === "needs_attention" && !entry.manualRecovery) {
                 await this._storeState(entry, "waiting");
             }
         });
@@ -645,11 +652,11 @@ export class OfflinePlugin extends Plugin {
             this._pending().some((earlier) => earlier.seq === null && entry.refs.includes(earlier.key));
     }
 
-    async getDraftSaveState(model, key, timeStamp) {
+    async getDraftSaveState(model, original) {
         try {
             return await this._queue.lock(async () => {
                 await this._refreshQueue();
-                return this._getDraftSaveState(model, key, timeStamp);
+                return this._getDraftSaveState(model, original);
             });
         } catch {
             this._reportStorageError();
@@ -657,17 +664,17 @@ export class OfflinePlugin extends Plugin {
     }
 
     // Both callers hold the queue lock and have refreshed the pending entries.
-    async _getDraftSaveState(model, key, timeStamp) {
-        const resolution = await this._queue.resolveRecord(model, key);
+    async _getDraftSaveState(model, { key, createdId, acted_at: timeStamp }) {
+        const resolution = await this._queue.resolveRecord(model, createdId ?? key);
         const entries = this._pending().filter((entry) => entry.model === model);
         const resId = resolution?.id ?? entries.find((entry) =>
             entry.resolvedResId && entry.args[0]?.[0] === `offline:${key}`
         )?.resolvedResId;
         const pending = entries.some((entry) => entry.key === key ||
             (resId && entry.target.ids.includes(resId)));
-        // Once a receipt could have expired, a missing create no longer proves it was discarded.
-        const unverified = !resId && !pending && !(Date.now() - timeStamp < RESOLUTION_TTL);
-        return { resId, pending, unverified };
+        // A missing create can mean its local receipt expired instead of being discarded.
+        const recover = !resId && !pending && !(Date.now() - timeStamp < RESOLUTION_TTL);
+        return { resId, pending, recover };
     }
 
     syncPendingChanges() {
@@ -676,7 +683,7 @@ export class OfflinePlugin extends Plugin {
 
     getPendingDraftCreate(model, legacyKey) {
         return this._pending().find((entry) => entry.model === model && entry.method === "web_save" &&
-            String(entry.legacyKey) === String(legacyKey) && !entry.args[0]?.length);
+            String(entry.legacyKey) === String(legacyKey) && !entry.manualRecovery && !entry.args[0]?.length);
     }
 
     _makeEntry({ model, method, args, kwargs, options = {} }) {
@@ -689,8 +696,10 @@ export class OfflinePlugin extends Plugin {
         const draftSave = !options.createdId && options.id !== undefined &&
             method === "web_save" && !args[0]?.length;
         const syncedId = draftSave && options.resolvedDraftId;
-        const create = draftSave && !syncedId && this.getPendingDraftCreate(model, legacyKey);
-        const createdId = options.createdId ?? (!create && !syncedId ? options.fallbackCreatedId : undefined);
+        const create = draftSave && !syncedId &&
+            (options.recoveryCreate || this.getPendingDraftCreate(model, legacyKey));
+        const createdId = options.createdId ?? (!create && !syncedId && !options.manualRecovery
+            ? options.fallbackCreatedId : undefined);
         if (syncedId) {
             args = [[syncedId], ...args.slice(1)];
             targetIds.push(syncedId);
@@ -714,8 +723,9 @@ export class OfflinePlugin extends Plugin {
             label: options.label || extras?.displayName || "",
             acted_at: extras?.timeStamp ?? Date.now(),
             server_version: session.registry_hash,
-            state: extras?.error ? "needs_attention" : "waiting",
-            error: extras?.error || null,
+            state: options.manualRecovery || extras?.error ? "needs_attention" : "waiting",
+            error: options.manualRecovery || extras?.error || null,
+            ...(options.manualRecovery && { manualRecovery: true }),
         };
     }
 
@@ -739,7 +749,9 @@ export class OfflinePlugin extends Plugin {
     _compatEntry(entry) {
         const { model, method, args, legacyArgs, kwargs, extras, resolvedResId } = entry;
         const formArgs = resolvedResId ? [[resolvedResId], ...args.slice(1)] : legacyArgs || args;
-        return { key: entry.legacyKey, value: { model, method, args: formArgs, kwargs, extras } };
+        return { key: entry.legacyKey, value: { model, method, args: formArgs, kwargs, extras,
+            ...(entry.manualRecovery && { manualRecovery: true }),
+        } };
     }
 
     async _refreshQueue() {
@@ -813,7 +825,7 @@ export class OfflinePlugin extends Plugin {
                             this._removeEntry(snapshot.key);
                             return;
                         }
-                        if (current.state === "needs_attention") {
+                        if (current.manualRecovery || current.state === "needs_attention") {
                             blockers.push(current);
                             return;
                         }

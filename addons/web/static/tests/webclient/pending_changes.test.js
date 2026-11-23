@@ -73,6 +73,34 @@ test("a rejected change shows its reason and can be retried", async () => {
     expect(liveRegion).toHaveText("All changes sent");
 });
 
+test("a manual recovery opens the server record without applying the queued line edit", async () => {
+    class PendingContact extends models.Model {
+        _name = "pending.contact";
+        name = fields.Char();
+        _records = [{ id: 47, name: "Server value" }];
+        _views = { "form,false": '<form><field name="name" readonly="1"/></form>' };
+    }
+    defineModels([PendingContact, ...Object.values(webModels)]);
+    defineActions([{ id: 5, res_model: "pending.contact", views: [[false, "form"]] }]);
+    await mountWithCleanup(WebClient);
+    const offline = getService(OfflinePlugin);
+    const reason = "Reopen Server value after it has been sent to reapply this line change.";
+    const changes = { name: "Queued value" };
+    await offline.scheduleORMDurably("pending.contact", "web_save", [[47], changes], {}, {
+        manualRecovery: reason,
+        extras: { actionId: 5, viewType: "form", changes },
+    });
+    await contains(".o_offline_systray").click();
+    expect(queryAllTexts(".o_offline_pending_details small")).toEqual(["Needs attention", reason]);
+    expect(".o_offline_pending_item button:contains(Retry)").toHaveCount(0);
+    await contains(".o_offline_pending_item button:contains(Open)").click();
+    await waitFor(".o_form_view .o_field_widget[name='name']:contains(Server value)");
+    await contains(".o_offline_systray").click();
+    await contains(".o_offline_pending_item button[aria-label='Discard offline changes']").click();
+    await contains(".modal-footer button.btn-primary").click();
+    expect(await offline._queue.list()).toEqual([]);
+});
+
 test("Open shows the values of the selected save when two saves share a legacy key", async () => {
     class PendingContact extends models.Model {
         _name = "pending.contact";

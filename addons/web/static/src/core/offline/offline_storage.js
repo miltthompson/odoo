@@ -151,7 +151,7 @@ export class OfflineQueueStore {
             .filter((entry) => entry.target.model === model && entry.refs.includes(key) && entry.target.ids.includes(localId))
             .map((entry) => ({
                 ...entry,
-                ...(entry.legacyArgs && { resolvedResId: id }),
+                ...(entry.method === "web_save" && { resolvedResId: id }),
                 target: {
                     ...entry.target,
                     ids: [...new Set(entry.target.ids.map((targetId) => targetId === localId ? id : targetId))],

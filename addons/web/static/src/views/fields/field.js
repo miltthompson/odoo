@@ -411,12 +411,12 @@ export class Field extends Component {
 
     get fieldComponentProps() {
         const record = this.props.record;
-        // Disable edition in offline mode, except for a some fields
+        const type = record.fields[this.props.name].type;
+        // Keep one2many rows read-only while the form still has its offline draft data.
         let readonly =
             this.props.readonly ||
-            (this.offlinePlugin.isOffline() &&
-                !validFieldTypes[this.props.record.fields[this.props.name].type]
-                    .availableOffline) ||
+            (type === "one2many" && record.hasOfflineDraft) ||
+            (this.offlinePlugin.isOffline() && !validFieldTypes[type].availableOffline) ||
             false;
 
         let propsFromNode = {};
