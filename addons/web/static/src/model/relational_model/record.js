@@ -1508,6 +1508,31 @@ export class Record extends DataPoint {
         }
     }
 
+    _getRecoveryLineTargets(changes) {
+        const targets = {};
+        for (const [fieldName, commands] of Object.entries(changes)) {
+            if (this.fields[fieldName].type !== "one2many") {
+                continue;
+            }
+            const list = this.data[fieldName];
+            const lines = [];
+            for (const [operation, id] of commands) {
+                if (operation !== x2ManyCommands.UPDATE) {
+                    continue;
+                }
+                const index = list.currentIds.indexOf(id);
+                if (index !== -1) {
+                    const data = list._cache[id]?.data;
+                    lines.push({ id, position: index + 1, name: data?.display_name || data?.name });
+                }
+            }
+            if (lines.length) {
+                targets[fieldName] = lines;
+            }
+        }
+        return targets;
+    }
+
     _commitSave(records) {
         this._values = markRaw({ ...this._values, ...this._changes });
         if ("id" in this.activeFields && records) {
@@ -1618,6 +1643,7 @@ export class Record extends DataPoint {
             }
             createArgs = [[], values];
         }
+        const manualRecovery = recoveryReason || this._getDraftRecoveryReason(changes);
         return {
             call: {
                 model: this.resModel,
@@ -1628,7 +1654,7 @@ export class Record extends DataPoint {
                     id: this._offlineId,
                     key,
                     draftCreate: this._offlineDraft,
-                    manualRecovery: recoveryReason || this._getDraftRecoveryReason(changes),
+                    manualRecovery,
                     fallbackCreatedId: this.isNew ? offlineRecordId(key) : undefined,
                     createArgs,
                     refs: reference.key ? [reference.key] : [],
@@ -1643,6 +1669,7 @@ export class Record extends DataPoint {
                         ),
                         overlayValues: this._offlineOverlayValues(this.isNew ? this.data : this._changes),
                         overlayBefore: this.isNew ? undefined : this._offlineOverlayValues(this._values),
+                        ...(manualRecovery && { recoveryLineTargets: this._getRecoveryLineTargets(changes) }),
                     },
                 },
             },

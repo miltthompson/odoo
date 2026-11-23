@@ -34,7 +34,7 @@ function formatPendingValue(value) {
     return value?.display_name ?? (value && typeof value === "object" ? JSON.stringify(value) : value);
 }
 
-function describeLineChanges(changes) {
+function describeLineChanges(changes, targets = []) {
     const { CREATE, UPDATE, DELETE, UNLINK } = x2ManyCommands;
     return changes.map((command) => {
         if (!Array.isArray(command)) {
@@ -45,7 +45,20 @@ function describeLineChanges(changes) {
             const fields = Object.entries(values).map(([field, value]) =>
                 _t("%(field)s: %(value)s", { field, value: formatPendingValue(value) })
             ).join(", ");
-            return operation === CREATE ? _t("Add line: %s", fields) : _t("Edit line: %s", fields);
+            if (operation === CREATE) {
+                return _t("Add line: %s", fields);
+            }
+            const target = targets.find((line) => line.id === id);
+            if (target?.name) {
+                return _t("Edit line %(position)s (%(name)s): %(fields)s", { ...target, fields });
+            }
+            if (target) {
+                return _t("Edit line %(position)s: %(fields)s", { ...target, fields });
+            }
+            if (Number.isSafeInteger(id) && id > 0) {
+                return _t("Edit line (record ID %(id)s): %(fields)s", { id, fields });
+            }
+            return _t("Edit line: %s", fields);
         }
         if (operation === DELETE || operation === UNLINK) {
             return Number.isSafeInteger(id) && id > 0 ? _t("Remove line %s", id) : _t("Remove line");
@@ -186,7 +199,7 @@ class OfflineSystray extends Component {
                 item.tooltip.changes = Object.entries(extras.changes || {}).map(([k, v]) => [
                     k,
                     value.manualRecovery
-                        ? Array.isArray(v) ? describeLineChanges(v) : formatPendingValue(v)
+                        ? Array.isArray(v) ? describeLineChanges(v, extras.recoveryLineTargets?.[k]) : formatPendingValue(v)
                         : v?.display_name ?? v,
                 ]);
                 if (value.manualRecovery) {
